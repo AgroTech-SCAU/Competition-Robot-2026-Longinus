@@ -17,6 +17,7 @@
 > Linux / Ubuntu：
 >
 > ```bash
+> chmod +x setup-scripts/setup-git.sh
 > bash setup-scripts/setup-git.sh
 > ```
 >
