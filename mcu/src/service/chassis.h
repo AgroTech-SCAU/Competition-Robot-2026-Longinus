@@ -1,7 +1,7 @@
 #ifndef _CHASSIS_H_
 #define _CHASSIS_H_
 
-#include "bus_motor/agv_motor.h" // IWYU pragma: keep
+#include "bus_motor.h"
 #include "steer_wheel_kine.h"
 #include <stdbool.h>
 #include <stdint.h>
@@ -35,7 +35,7 @@
     X(NOT_INITIALIZED, "Chassis Not Initialized")
 
 /**
- * @brief 四个舵轮模块的固定顺序和总线映射
+ * @brief 四个舵轮模块的固定顺序和业务逻辑电机 ID
  *
  * 顺序约定为(name, index, steer_id, drive_id)：
  * - FL: Front Left
@@ -44,10 +44,10 @@
  * - RL: Rear Left
  */
 #define CHASSIS_MODULE_TABLE \
-    X(FL, 0, 1, 0)           \
-    X(FR, 1, 2, 1)           \
-    X(RR, 2, 3, 2)           \
-    X(RL, 3, 4, 3)
+    X(FL, 0, 1, 5)           \
+    X(FR, 1, 2, 6)           \
+    X(RR, 2, 3, 7)           \
+    X(RL, 3, 4, 8)
 
 /**
  * @brief 底盘服务错误码
@@ -87,24 +87,19 @@ typedef struct {
 
 /**
  * @brief 底盘服务初始化配置
- * @param steer_motor_interface 转向电机抽象接口实例
- * @param drive_motor_interface 驱动电机抽象接口实例
- * @param steer_ops 转向电机总线端口操作表
- * @param drive_ops 驱动电机总线端口操作表
  * @param prepare_steer_motor 转向电机上电准备回调函数
  * @param model 舵轮底盘几何模型参数
  * @param wheel_drive_ratio 轮速到驱动电机速度的传动比
  * @param steer_target_mode 转向电机目标角生成模式
  */
 typedef struct {
-    const BusMotorInterface* steer_motor_interface;
-    const BusMotorInterface* drive_motor_interface;
-    const BusMotorPortOps* steer_ops;
-    const BusMotorPortOps* drive_ops;
-    BusMotorStatus (*prepare_steer_motor)(uint16_t id);
-    BusMotorStatus (*prepare_drive_motor)(uint16_t id);
-
-    /** @brief 项目级反馈新鲜度与设备状态检查 */
+    BusMotorStatus (*prepare_steer_motor)(BusMotorId id);
+    BusMotorStatus (*prepare_drive_motor)(BusMotorId id);
+    BusMotorStatus (*set_steer_target)(BusMotorId id, float position, float velocity);
+    BusMotorStatus (*motor_update)(void);
+    void (*clear_motor_fault)(void);
+    BusMotorGroupId drive_group;
+    int8_t drive_sign[CHASSIS_MODULE_COUNT];
     bool (*feedback_is_valid)(void);
     SteerWheelModel model;
     float wheel_drive_ratio;
@@ -261,6 +256,12 @@ ChassisErrorCode chassis_stop(void);
  * @details 关闭时清零并请求停止，不能替代硬件急停
  */
 ChassisErrorCode chassis_set_output_enabled(bool enabled);
+
+/** @brief 禁止输出时复位项目接收故障，随后仍需显式手动使能 */
+ChassisErrorCode chassis_clear_motor_fault(void);
+
+/** @brief 处理反馈和驱动超时，不生成运动命令 */
+ChassisErrorCode chassis_poll(void);
 
 /**
  * @brief 请求底盘进入驻车刹车状态

@@ -55,6 +55,15 @@ static inline bool entry_tick_100hz(void);
  * @brief 系统初始化入口
  * @details 按照启动依赖顺序完成底层装配, 应用层初始化, 最后启动 500Hz 定时调度
  */
+static inline bool entry_chassis_settle(ms_t interval_ms) {
+    const ms_t start = delay_now_ms();
+    while((ms_t)(delay_now_ms() - start) < interval_ms) {
+        delay_ms(1u);
+        if(chassis_poll() != CHASSIS_OK) return false;
+    }
+    return true;
+}
+
 static inline void entry_init(void) {
     if(assemble_delay() != SYSTEM_STATUS_OK)
         return;
@@ -82,12 +91,12 @@ static inline void entry_init(void) {
     if(assemble_chassis() != SYSTEM_STATUS_OK)
         return;
     log_info("BOOT chassis ready");
-    delay_ms(100u);
+    if(!entry_chassis_settle(100u)) return;
 
     if(assemble_remote() != SYSTEM_STATUS_OK)
         return;
     log_info("BOOT remote ready");
-    delay_ms(100u);
+    if(!entry_chassis_settle(100u)) return;
 
     {
         remote_init();
@@ -96,15 +105,15 @@ static inline void entry_init(void) {
         app_status_init();
     }
     log_info("BOOT app ready");
-    delay_ms(100u);
+    if(!entry_chassis_settle(100u)) return;
 
     if(assemble_tim6_500hz() != SYSTEM_STATUS_OK)
         return;
     log_info("BOOT tim6 500hz ready");
-    delay_ms(100u);
+    if(!entry_chassis_settle(100u)) return;
 
     log_info("System initialized successfully");
-    delay_ms(500u);
+    if(!entry_chassis_settle(500u)) return;
 
     init_ok = true;
 }

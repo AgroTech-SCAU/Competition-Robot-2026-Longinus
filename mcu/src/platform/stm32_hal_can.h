@@ -93,4 +93,7 @@ BspCanStatus can_register_rx_callback(FDCAN_HandleTypeDef* hcan, STM32HalCanRxCa
  */
 const char* can_error_code_to_str(BspCanStatus status);
 
+uint32_t can_critical_enter(void);
+void can_critical_exit(uint32_t state);
+
 #endif

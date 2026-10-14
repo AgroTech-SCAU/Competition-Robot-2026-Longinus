@@ -26,6 +26,12 @@ virtualFolder:
         - path: ../external/Embedded-Electronic-Control-Standard/sdks/infra/matrix.c
         - path: ../external/Embedded-Electronic-Control-Standard/sdks/infra/hfsm/hfsm.c
         - path: ../external/Embedded-Electronic-Control-Standard/sdks/infra/hfsm/hfsm_core.c
+        - path: ../external/Embedded-Electronic-Control-Standard/sdks/device/bus_motor/bus_motor.c
+        - path: ../external/Embedded-Electronic-Control-Standard/sdks/device/bus_motor/dm_motor.c
+        - path: ../external/Embedded-Electronic-Control-Standard/sdks/device/bus_motor/dji_motor.c
+        - path: ../external/Embedded-Electronic-Control-Standard/sdks/device/bus_motor/dm_motor/dm_motor_core.c
+        - path: ../external/Embedded-Electronic-Control-Standard/sdks/device/bus_motor/dm_motor/dm_motor_protocol_v3.c
+        - path: ../external/Embedded-Electronic-Control-Standard/sdks/device/bus_motor/dm_motor/dm_motor_protocol_v4.c
       folders: []
 dependenceList: []
 outDir: build
@@ -46,10 +52,10 @@ targets:
         - Drivers/CMSIS/Device/ST/STM32H7xx/Include
         - Drivers/CMSIS/Include
         - src/app
-        - src/device
         - src/domain
         - src/platform
         - src/service
+        - ../external/Embedded-Electronic-Control-Standard/sdks/device/bus_motor
         - ../external/Embedded-Electronic-Control-Standard/sdks/device/fs_ia10b
         - ../external/Embedded-Electronic-Control-Standard/sdks/device/imu
         - ../external/Embedded-Electronic-Control-Standard/sdks/device/rgb_led
@@ -124,10 +130,10 @@ targets:
         - Drivers/CMSIS/Device/ST/STM32H7xx/Include
         - Drivers/CMSIS/Include
         - src/app
-        - src/device
         - src/domain
         - src/platform
         - src/service
+        - ../external/Embedded-Electronic-Control-Standard/sdks/device/bus_motor
         - ../external/Embedded-Electronic-Control-Standard/sdks/device/fs_ia10b
         - ../external/Embedded-Electronic-Control-Standard/sdks/device/imu
         - ../external/Embedded-Electronic-Control-Standard/sdks/device/rgb_led

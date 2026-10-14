@@ -47,7 +47,9 @@ void app_runtime_process(void) {
         s_manual_edge_armed = false;
         app_runtime_stop();
         if(app_fsm_get_state() == APP_FSM_STATE_FAULT) {
-            (void)app_fsm_clear_fault();
+            if(chassis_clear_motor_fault() == CHASSIS_OK) {
+                (void)app_fsm_clear_fault();
+            }
         }
         else {
             (void)app_fsm_post(APP_FSM_EVENT_STOP);

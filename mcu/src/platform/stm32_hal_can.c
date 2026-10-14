@@ -135,14 +135,11 @@ BspCanStatus can_send(FDCAN_HandleTypeDef* hcan, uint32_t id, const uint8_t* dat
     tx_header.TxEventFifoControl = FDCAN_NO_TX_EVENTS;
     tx_header.MessageMarker = 0u;
 
-    if(HAL_FDCAN_GetTxFifoFreeLevel(hcan) == 0u) {
-        uint32_t pending = hcan->Instance->TXBRP;
-
-        if(pending != 0u) {
-            (void)HAL_FDCAN_AbortTxRequest(hcan, pending);
+    const uint32_t start_ms = HAL_GetTick();
+    while(HAL_FDCAN_GetTxFifoFreeLevel(hcan) == 0u) {
+        if(__get_IPSR() != 0u || (uint32_t)(HAL_GetTick() - start_ms) >= 5u) {
+            return STM32_HAL_CAN_TX_MAILBOX_TIMEOUT;
         }
-
-        return STM32_HAL_CAN_TX_MAILBOX_TIMEOUT;
     }
 
     if(HAL_FDCAN_AddMessageToTxFifoQ(hcan, &tx_header, (uint8_t*)data) != HAL_OK) {
@@ -299,4 +296,16 @@ static void can_enable_transceiver(FDCAN_HandleTypeDef* hcan) {
     else if(hcan->Instance == FDCAN2) {
         HAL_GPIO_WritePin(CAN2_EN_GPIO_Port, CAN2_EN_Pin, GPIO_PIN_SET);
     }
+}
+
+uint32_t can_critical_enter(void) {
+    const uint32_t state = __get_PRIMASK();
+    __disable_irq();
+    __DMB();
+    return state;
+}
+
+void can_critical_exit(uint32_t state) {
+    __DMB();
+    __set_PRIMASK(state);
 }
