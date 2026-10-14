@@ -6,13 +6,13 @@
 >
 > 项目负责人 / 仓库管理员首次创建仓库后，请完成以下初始化：
 >
-> - [ ] 点击绿色按钮 `Code` → `Clone using the web URL.` → `git clone <仓库 URL>`，将仓库克隆到本地
+> - [x] 点击绿色按钮 `Code` → `Clone using the web URL.` → `git clone <仓库 URL>`，将仓库克隆到本地
 > - [ ] 填写本 README 中的项目基本信息、环境、构建与运行方式
-> - [ ] 填写 [`docs/plan.md`](docs/plan.md)，明确当前目标与下一步
-> - [ ] 确认默认分支为 `main`
-> - [ ] 确认仓库已启用 Issues，并检查 `New issue` 页面可以看到仓库自带的 Issue Forms
-> - [ ] **如果为 public 仓库，请导入规则集以保护 main 分支**：进入 `Settings → Rules → Rulesets → New ruleset → Import a ruleset`，导入 [`.github/rulesets/main-protection.json`](.github/rulesets/main-protection.json)，点击 `Create` 并确认规则已作用于 `main`
-> - [ ] 推荐：运行本仓库的一键 Git 设置脚本，开启本地防误操作提醒（可跳过；Ruleset 仍会保护 `main`）
+> - [x] 填写 [`docs/plan.md`](docs/plan.md)，明确当前目标与下一步
+> - [x] 确认默认分支为 `main`
+> - [x] 确认仓库已启用 Issues，并检查 `New issue` 页面可以看到仓库自带的 Issue Forms
+> - [x] **如果为 public 仓库，请导入规则集以保护 main 分支**：进入 `Settings → Rules → Rulesets → New ruleset → Import a ruleset`，导入 [`.github/rulesets/main-protection.json`](.github/rulesets/main-protection.json)，点击 `Create` 并确认规则已作用于 `main`
+> - [x] 推荐：运行本仓库的一键 Git 设置脚本，开启本地防误操作提醒（可跳过；Ruleset 仍会保护 `main`）
 >
 > Linux / Ubuntu：
 >
