@@ -31,9 +31,9 @@
 >
 > **初始化全部完成后，请删除本段“仓库初始化”提示**
 
-# <项目名称>
+# Longinus
 
-> 一句话说明项目 / 仓库解决什么问题或维护什么资产
+> STM32H723 四舵轮遥控底盘工程，当前先保留 Atlas MCU 行为基线，后续按计划收敛业务并验证 Standard SDK
 
 ## 当前状态
 
@@ -91,9 +91,13 @@
 
 ## 4. 构建（如适用）
 
-```bash
-# 示例
-```
+使用 VS Code Embedded IDE（`cl.eide`）打开 `mcu/robot.code-workspace`，配置 Arm GNU Toolchain，选择 `Debug` 后执行 Rebuild
+
+- EIDE 配置为 `mcu/.eide/eide.yml`，Debug 使用 `STM32H723VGTX_FLASH_USER.ld`
+- CubeMX 配置为 `mcu/robot.ioc`，HAL/CMSIS、启动文件和生成的 Core 源码已纳入仓库
+- 产物输出到 `mcu/build/Debug/`，不随仓库提交
+- 源 Atlas Commit 为 `979db4831d2e6c3331fb68ff88b2079158f8bfd6`
+- 抽取路径为 `Atlas/chassis_control_code/`，目前未接入 Standard，仍保留原 MCU 业务依赖
 
 > 文档、模型、数据等非软件仓库可将本节改为“获取 / 导入 / 使用方式”
 
@@ -117,6 +121,7 @@
 
 ```text
 .
+├── mcu/               # Atlas MCU 基线与完整构建资源
 ├── README.md
 ├── docs/
 │   └── plan.md

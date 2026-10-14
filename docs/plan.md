@@ -36,7 +36,7 @@
 
 # 4 完成标准
 
-- [ ] Longinus 基于 AgroTech Repository Template 创建，MCU 工程统一放在 `mcu/`
+- [x] Longinus 基于 AgroTech Repository Template 创建，MCU 工程统一放在 `mcu/`
 - [ ] Longinus 不包含首版无关的 Atlas 机械臂、吸盘、PC、Pi、ASRPro 业务
 - [ ] Standard 以真正的 Git Submodule 引入，跟踪 `main` 用于人工更新，每个通过验证的 Longinus 检查点都指向确定的 SDK Commit
 - [ ] Longinus 编译时只使用 Standard 中所需的正式 SDK 模块，无重复符号或私有公共 SDK 副本
@@ -116,7 +116,7 @@ SDK 合入和 Longinus gitlink 指针提交由负责人另行确认执行
 
 # 7 实施步骤
 
-## 步骤 1 `[ ]` 创建 Longinus 并抽离 Atlas MCU 可编译基线
+## 步骤 1 `[x]` 创建 Longinus 并抽离 Atlas MCU 可编译基线
 
 **前置条件**
 
@@ -148,9 +148,17 @@ Longinus 远端仓库由负责人基于 AgroTech Repository Template 创建
 
 **最小验证**
 
-- [ ] 仓库模板基础文件齐全
-- [ ] MCU 目录和工具链引用完整
-- [ ] 抽离后的 MCU 与 Atlas 源工程可达到同级别构建状态
+- [x] 仓库模板基础文件齐全
+- [x] MCU 目录和工具链引用完整
+- [x] 抽离后的源码和构建引用与 Atlas 基线静态一致，未执行编译
+
+**执行记录**
+
+- 已抽取 MCU 到 `mcu/`，保留原业务源码与构建资源，排除独立业务目录、模型、测试和历史产物
+- 源 Atlas Commit 为 `979db4831d2e6c3331fb68ff88b2079158f8bfd6`
+- 原先未跟踪的 Core、HAL/CMSIS 和 CubeMX 资源来自本地 Atlas 工作区，已纳入 Longinus
+- 静态核查确认 253 个复制文件逐字节一致，另 3 个文件仅有现存排版和注释差异，已保留，21 个 EIDE 路径和 97 个历史编译输入齐全，模板文件及忽略规则检查通过
+- 按负责人要求，后续仅实现和静态验证，不执行编译，不以编译结果作为 Codex 步骤完成条件，真机结果仍须实际设备证据
 
 **Codex Prompt**
 
@@ -166,7 +174,7 @@ Longinus 远端仓库由负责人基于 AgroTech Repository Template 创建
 
 **前置条件**
 
-步骤 1 已完成且构建基线已记录
+步骤 1 已完成且源码与构建配置基线已记录
 
 **目标**
 
@@ -439,13 +447,13 @@ git submodule status
 
 # 11 当前立即执行
 
-使用 AgroTech Repository Template 创建 `Competition-Robot-2026-Longinus` 仓库，然后执行步骤 1，先取得可编译的 Atlas MCU 原样抽离基线
+步骤 1 已完成，接下来执行步骤 2，收敛为纯遥控底盘 MCU 并静态验证控制链和安全停止路径
 
 # 12 进度统计
 
 | 步骤 | 任务 | 状态 |
 |---:|---|:---:|
-| 1 | 创建 Longinus 并抽离可编译 MCU | [ ] |
+| 1 | 创建 Longinus 并抽离 MCU 基线，静态验证通过 | [x] |
 | 2 | 删除非底盘业务 | [ ] |
 | 3 | 引入 Standard main 子模块与公共模块迁移 | [ ] |
 | 4 | 迁移 DM DJI 到新版 bus_motor | [ ] |
