@@ -1,7 +1,7 @@
 #include "assemble.h"
 
-#include "rgb_led/rgb_led.h"
-#include "rgb_led/ws2812_rgb_led.h"
+#include "rgb_led.h"
+#include "ws2812_rgb_led.h"
 #include "stm32_hal_spi.h"
 
 // ! ========================= 变 量 声 明 ========================= ! //

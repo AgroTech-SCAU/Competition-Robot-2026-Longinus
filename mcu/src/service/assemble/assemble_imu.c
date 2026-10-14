@@ -1,7 +1,7 @@
 #include "assemble.h"
 
-#include "imu/bmi088.h"
-#include "imu/imu.h"
+#include "bmi088.h"
+#include "imu.h"
 #include "log.h"
 #include "stm32_hal_bmi088.h"
 

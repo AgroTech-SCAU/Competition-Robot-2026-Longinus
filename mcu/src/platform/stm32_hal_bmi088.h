@@ -3,7 +3,7 @@
 
 #include <stdint.h>
 
-#include "imu/bmi088.h"
+#include "bmi088.h"
 #include "main.h" // IWYU pragma: keep
 
 // ! ========================= 接 口 函 数 声 明 ========================= ! //

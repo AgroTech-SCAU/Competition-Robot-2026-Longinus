@@ -10,7 +10,23 @@ srcDirs:
 virtualFolder:
   name: <virtual_root>
   files: []
-  folders: []
+  folders:
+    - name: Standard
+      files:
+        - path: ../external/Embedded-Electronic-Control-Standard/sdks/device/fs_ia10b/fs_ia10b.c
+        - path: ../external/Embedded-Electronic-Control-Standard/sdks/device/imu/imu.c
+        - path: ../external/Embedded-Electronic-Control-Standard/sdks/device/imu/imu_attitude.c
+        - path: ../external/Embedded-Electronic-Control-Standard/sdks/device/imu/bmi088.c
+        - path: ../external/Embedded-Electronic-Control-Standard/sdks/device/rgb_led/rgb_led.c
+        - path: ../external/Embedded-Electronic-Control-Standard/sdks/device/rgb_led/ws2812_rgb_led.c
+        - path: ../external/Embedded-Electronic-Control-Standard/sdks/domain/steer_wheel_kine.c
+        - path: ../external/Embedded-Electronic-Control-Standard/sdks/infra/delay.c
+        - path: ../external/Embedded-Electronic-Control-Standard/sdks/infra/log.c
+        - path: ../external/Embedded-Electronic-Control-Standard/sdks/infra/pid.c
+        - path: ../external/Embedded-Electronic-Control-Standard/sdks/infra/matrix.c
+        - path: ../external/Embedded-Electronic-Control-Standard/sdks/infra/hfsm/hfsm.c
+        - path: ../external/Embedded-Electronic-Control-Standard/sdks/infra/hfsm/hfsm_core.c
+      folders: []
 dependenceList: []
 outDir: build
 miscInfo:
@@ -32,9 +48,13 @@ targets:
         - src/app
         - src/device
         - src/domain
-        - src/infra
         - src/platform
         - src/service
+        - ../external/Embedded-Electronic-Control-Standard/sdks/device/fs_ia10b
+        - ../external/Embedded-Electronic-Control-Standard/sdks/device/imu
+        - ../external/Embedded-Electronic-Control-Standard/sdks/device/rgb_led
+        - ../external/Embedded-Electronic-Control-Standard/sdks/domain
+        - ../external/Embedded-Electronic-Control-Standard/sdks/infra
       libList: []
     excludeList: []
     settings: {}
@@ -103,6 +123,16 @@ targets:
         - Drivers/STM32H7xx_HAL_Driver/Inc/Legacy
         - Drivers/CMSIS/Device/ST/STM32H7xx/Include
         - Drivers/CMSIS/Include
+        - src/app
+        - src/device
+        - src/domain
+        - src/platform
+        - src/service
+        - ../external/Embedded-Electronic-Control-Standard/sdks/device/fs_ia10b
+        - ../external/Embedded-Electronic-Control-Standard/sdks/device/imu
+        - ../external/Embedded-Electronic-Control-Standard/sdks/device/rgb_led
+        - ../external/Embedded-Electronic-Control-Standard/sdks/domain
+        - ../external/Embedded-Electronic-Control-Standard/sdks/infra
       libList: []
     excludeList: []
     settings: {}

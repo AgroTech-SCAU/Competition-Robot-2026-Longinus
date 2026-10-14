@@ -1,0 +1,4 @@
+[submodule "external/Embedded-Electronic-Control-Standard"]
+	path = external/Embedded-Electronic-Control-Standard
+	url = https://github.com/AgroTech-SCAU/Embedded-Electronic-Control-Standard.git
+	branch = main

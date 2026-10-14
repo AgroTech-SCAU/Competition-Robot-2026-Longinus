@@ -40,7 +40,7 @@
 
 - [x] Longinus 基于 AgroTech Repository Template 创建，MCU 工程统一放在 `mcu/`
 - [x] Longinus 不包含首版无关的 Atlas 机械臂、吸盘、PC、Pi、ASRPro 业务
-- [ ] Standard 以真正的 Git Submodule 引入，跟踪 `main` 用于人工更新，每个通过验证的 Longinus 检查点都指向确定的 SDK Commit
+- [x] Standard 以真正的 Git Submodule 引入，跟踪 `main` 用于人工更新，每个通过验证的 Longinus 检查点都指向确定的 SDK Commit
 - [ ] Longinus 编译时只使用 Standard 中所需的正式 SDK 模块，无重复符号或私有公共 SDK 副本
 - [ ] 四个 DM 转向与四个 DJI 驱动在正确 CAN 总线上完成初始化、命令下发及反馈读取
 - [ ] Atlas 必要手动底盘行为保留且可运行
@@ -230,7 +230,7 @@ Longinus 远端仓库由负责人基于 AgroTech Repository Template 创建
 不要迁移 Standard 驱动
 ```
 
-## 步骤 3 `[ ]` 引入跟踪 main 的 Standard Submodule 并逐模块去重
+## 步骤 3 `[x]` 引入跟踪 main 的 Standard Submodule 并逐模块去重
 
 **前置条件**
 
@@ -268,11 +268,23 @@ Longinus 远端仓库由负责人基于 AgroTech Repository Template 创建
 
 **最小验证**
 
-- [ ] `.gitmodules` 指明 Standard 和跟踪分支 main
-- [ ] `git submodule status` 可复核 SDK Commit
-- [ ] 已迁模块的正式源码路径全部来自 Standard
-- [ ] 编译无重复符号 缺失源文件或 include 污染
-- [ ] 遥控在线判断和运动学坐标语义经静态检查符合预期
+- [x] `.gitmodules` 指明 Standard 和跟踪分支 main
+- [x] `git submodule status` 可复核 SDK Commit
+- [x] 已迁模块的正式源码路径全部来自 Standard
+- [x] 构建来源和头文件静态检查无重复实现、缺失引用或新旧电机接口混用，未执行编译
+- [x] 遥控在线判断和运动学坐标语义经静态检查符合预期
+
+**执行记录**
+
+- Standard 作为真实 Git Submodule 引入，`.gitmodules` 设置 `branch = main`，当前 gitlink 与子模块 HEAD 均固定为 `7cb71c60e4c5837d703db411a5497a5b31984a67`，子模块工作区干净
+- EIDE 显式选择 13 个正式 SDK 源文件，迁移 FS-iA10B、舵轮运动学、IMU、RGB、delay、log、PID、matrix 与 HFSM，Debug 和 Release 使用相同依赖来源
+- 删除已迁模块的本地副本与无调用依赖的旧串口舵机、机械臂数学库和协议模块，旧电机源码保持不变，未引入 Standard bus_motor
+- FS-iA10B 实例与 PortOps 在 assemble 绑定 UART5，platform 提供同步取消接收与临界区恢复，业务在线状态使用实际有效帧时间并检查维护返回值
+- Standard 使用前左逆时针右手坐标和 FL FR RR RL 轮序，项目 twist 输入输出保持该坐标，电机反馈角及下发角在项目边界取反，物理驻车目标不变
+- `python3 /tmp/longinus-step3-static.py` 通过源文件、头引用、函数定义去重、接收机绑定和坐标推导检查，27 组 twist 与四轮角度反射关系一致，`git diff --check` 与 `git diff --cached --check` 通过
+- `git submodule status` 与 `git ls-files --stage` 可复核同一 SDK Commit，父仓库仅暂存必要子模块元数据和 gitlink，未执行提交或推送，静态审查未发现阻塞问题
+- 当前有效构建入口为 EIDE，未迁移被现有规则忽略的 CubeIDE 生成配置，未执行编译或真机验证
+- Standard 尚无现有里程计融合依赖的 Kalman 模块，暂留 `mcu/src/domain/kalman/` 作为未迁移的必要依赖，未复制到 Standard，也未改写融合逻辑，最终公共依赖收敛时仍需处理其归属
 
 **Codex Prompt**
 
@@ -281,7 +293,7 @@ Longinus 远端仓库由负责人基于 AgroTech Repository Template 创建
 在 Longinus 中添加指向 Standard main 的真实子模块
 记录当前 SDK Commit
 逐模块切换构建路径和项目级 PortOps 绑定
-每迁完一个模块移除其旧副本并检查编译
+每迁完一个模块移除其旧副本并静态检查来源、接口和依赖
 旧电机相关模块留给步骤 4 统一替换
 不得产生两份同名公共符号
 不修改 Standard 源码实现
@@ -459,7 +471,7 @@ git submodule status
 
 # 11 当前立即执行
 
-步骤 2 已完成，接下来执行步骤 3，引入 Standard 子模块并逐模块静态验证依赖迁移
+步骤 3 已完成，接下来执行步骤 4，迁移 DM DJI 到 Standard bus_motor 并静态核对安全路径
 
 # 12 进度统计
 
@@ -467,7 +479,7 @@ git submodule status
 |---:|---|:---:|
 | 1 | 创建 Longinus 并抽离 MCU 基线，静态验证通过 | [x] |
 | 2 | 删除非底盘业务，静态验证通过 | [x] |
-| 3 | 引入 Standard main 子模块与公共模块迁移 | [ ] |
+| 3 | 引入 Standard main 子模块与公共模块迁移，静态验证通过 | [x] |
 | 4 | 迁移 DM DJI 到新版 bus_motor | [ ] |
 | 5 | 遥控真机验收和 SDK Commit 冻结 | [ ] |
 | 最终验收 | Longinus MCU Baseline | [ ] |

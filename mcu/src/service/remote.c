@@ -10,10 +10,15 @@
 
 #define REMOTE_TIMEOUT_MS 100u
 
+static FsIa10b* s_receiver = NULL;
 static RemoteState s_remote_state = { 0 };
 static bool s_clear_reset_event_pending = false;
 static bool s_clear_reset_edge_armed = false;
 static bool s_clear_condition_active = false;
+
+void remote_set_receiver(FsIa10b* receiver) {
+    s_receiver = receiver;
+}
 
 void remote_init(void) {
     memset(&s_remote_state, 0, sizeof(s_remote_state));
@@ -26,8 +31,9 @@ void remote_process(void) {
     FsIa10bData rc_data;
     bool clear_condition;
 
-    ibus_maintain();
-    if(!ibus_get_data(&rc_data) || !ibus_is_online(REMOTE_TIMEOUT_MS)) {
+    if(s_receiver == NULL || fs_ia10b_maintain(s_receiver) != FS_IA10B_STATUS_OK ||
+       fs_ia10b_get_data(s_receiver, &rc_data) != FS_IA10B_STATUS_OK ||
+       !fs_ia10b_is_online(s_receiver, REMOTE_TIMEOUT_MS)) {
         memset(&s_remote_state, 0, sizeof(s_remote_state));
         s_clear_reset_event_pending = false;
         s_clear_reset_edge_armed = false;
@@ -37,7 +43,7 @@ void remote_process(void) {
 
     s_remote_state.online = true;
     s_remote_state.rc_data = rc_data;
-    s_remote_state.stamp_ms = delay_now_ms();
+    s_remote_state.stamp_ms = rc_data.last_update_ms;
     s_remote_state.manual_request = (rc_data.channel[REMOTE_CH_SWD] == REMOTE_SW_LOW &&
                                      rc_data.channel[REMOTE_CH_SWA] == REMOTE_SW_HIGH);
     clear_condition = (rc_data.channel[REMOTE_CH_SWC] == REMOTE_SW_HIGH &&
@@ -64,7 +70,7 @@ bool remote_get_state(RemoteState* out) {
 }
 
 bool remote_is_online(uint32_t timeout_ms) {
-    return s_remote_state.online && ibus_is_online(timeout_ms) &&
+    return s_remote_state.online && s_receiver != NULL && fs_ia10b_is_online(s_receiver, timeout_ms) &&
            (delay_now_ms() - s_remote_state.stamp_ms) <= timeout_ms;
 }
 

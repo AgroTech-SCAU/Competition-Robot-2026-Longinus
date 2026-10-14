@@ -38,6 +38,9 @@ typedef struct {
     uint32_t stamp_ms;
 } RemoteState;
 
+/** @brief 绑定装配层初始化的接收机实例 */
+void remote_set_receiver(FsIa10b* receiver);
+
 void remote_init(void);
 
 void remote_process(void);
@@ -48,12 +51,7 @@ bool remote_is_online(uint32_t timeout_ms);
 
 bool remote_is_manual_requested(void);
 
-
-
-
 bool remote_take_clear_reset_event(void);
-
-
 
 const FsIa10bData* remote_get_raw_data(void);
 

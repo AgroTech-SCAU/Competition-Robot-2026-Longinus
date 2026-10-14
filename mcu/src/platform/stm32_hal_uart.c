@@ -19,12 +19,12 @@ bool uart_receive_it(UART_HandleTypeDef* huart, uint8_t* data, uint16_t len) {
     return HAL_UART_Receive_IT(huart, data, len) == HAL_OK;
 }
 
-bool uart_abort_receive_it(UART_HandleTypeDef* huart) {
+bool uart_abort_receive(UART_HandleTypeDef* huart) {
     if(huart == NULL) {
         return false;
     }
 
-    return HAL_UART_AbortReceive_IT(huart) == HAL_OK;
+    return HAL_UART_AbortReceive(huart) == HAL_OK;
 }
 
 void uart_register_rx_complete_callback(UART_HandleTypeDef* huart, void (*callback)(void)) {
@@ -49,4 +49,19 @@ void HAL_UART_ErrorCallback(UART_HandleTypeDef* huart) {
     if(huart == &huart5 && uart5_error_callback != NULL) {
         uart5_error_callback();
     }
+}
+
+uint32_t uart_critical_enter(void* context) {
+    (void)context;
+    const uint32_t state = __get_PRIMASK();
+
+    __disable_irq();
+    __DMB();
+    return state;
+}
+
+void uart_critical_exit(void* context, uint32_t state) {
+    (void)context;
+    __DMB();
+    __set_PRIMASK(state);
 }

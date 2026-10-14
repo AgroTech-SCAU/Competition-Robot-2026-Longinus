@@ -1,7 +1,7 @@
 #include "odom.h"
 
 #include "chassis.h"
-#include "imu/imu.h"
+#include "imu.h"
 #include "stm32_hal_dwt.h"
 
 #include <math.h>

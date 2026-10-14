@@ -689,7 +689,7 @@ ChassisErrorCode chassis_process(void) {
         s_module_fb[map->module].drive_omega = drive_omega;
         s_module_fb[map->module].steer_abs_angle = steer_abs_angle;
         s_chassis.kine.state.cur_wheels[map->module].wheel_omega = chassis_drive_omega_to_wheel_omega(drive_omega);
-        s_chassis.kine.state.cur_wheels[map->module].steer_angle = chassis_wrap_pi(steer_abs_angle);
+        s_chassis.kine.state.cur_wheels[map->module].steer_angle = chassis_wrap_pi(-steer_abs_angle);
     }
 
     if(s_chassis.brake_requested) {
@@ -1015,18 +1015,18 @@ static void chassis_external_to_internal_twist(float vx_ext, float vy_ext, float
     if(vx_int != NULL)
         *vx_int = vx_ext;
     if(vy_int != NULL)
-        *vy_int = -vy_ext;
+        *vy_int = vy_ext;
     if(wz_int != NULL)
-        *wz_int = -wz_ext;
+        *wz_int = wz_ext;
 }
 
 static void chassis_internal_to_external_twist(float vx_int, float vy_int, float wz_int, float* vx_ext, float* vy_ext, float* wz_ext) {
     if(vx_ext != NULL)
         *vx_ext = vx_int;
     if(vy_ext != NULL)
-        *vy_ext = -vy_int;
+        *vy_ext = vy_int;
     if(wz_ext != NULL)
-        *wz_ext = -wz_int;
+        *wz_ext = wz_int;
 }
 
 static float chassis_calc_yaw_bias_ext(float vx_ext, float vy_ext) {
@@ -1169,7 +1169,8 @@ static void chassis_resolve_drive_module_command(ChassisModule module) {
     }
 
     current_angle = s_module_fb[module].steer_abs_angle;
-    target_angle = s_chassis.kine.control.wheels[module].steer_angle;
+    /* Atlas motor angles increase toward the old right-positive wheel frame */
+    target_angle = -s_chassis.kine.control.wheels[module].steer_angle;
     target_omega = s_chassis.kine.control.wheels[module].wheel_omega;
 
     option_a = chassis_select_nearest_heading_angle(current_angle, target_angle);
@@ -1279,10 +1280,10 @@ static void chassis_set_brake_targets(void) {
     s_chassis.kine.control.wheels[CHASSIS_MODULE_RR].wheel_omega = 0.0f;
     s_chassis.kine.control.wheels[CHASSIS_MODULE_RL].wheel_omega = 0.0f;
 
-    s_chassis.kine.control.wheels[CHASSIS_MODULE_FL].steer_angle = target_fl;
-    s_chassis.kine.control.wheels[CHASSIS_MODULE_FR].steer_angle = target_fr;
-    s_chassis.kine.control.wheels[CHASSIS_MODULE_RR].steer_angle = target_rr;
-    s_chassis.kine.control.wheels[CHASSIS_MODULE_RL].steer_angle = target_rl;
+    s_chassis.kine.control.wheels[CHASSIS_MODULE_FL].steer_angle = -target_fl;
+    s_chassis.kine.control.wheels[CHASSIS_MODULE_FR].steer_angle = -target_fr;
+    s_chassis.kine.control.wheels[CHASSIS_MODULE_RR].steer_angle = -target_rr;
+    s_chassis.kine.control.wheels[CHASSIS_MODULE_RL].steer_angle = -target_rl;
 
     chassis_resolve_brake_module_command(CHASSIS_MODULE_FL, target_fl);
     chassis_resolve_brake_module_command(CHASSIS_MODULE_FR, target_fr);

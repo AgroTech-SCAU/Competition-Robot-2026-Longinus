@@ -10,7 +10,7 @@
 #include "delay.h"
 #include "log.h"
 #include "remote.h"
-#include "rgb_led/rgb_led.h"
+#include "rgb_led.h"
 
 #include <stddef.h>
 
