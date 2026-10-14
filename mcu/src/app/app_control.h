@@ -17,7 +17,6 @@ typedef enum {
     APP_CONTROL_RESULT_SKIPPED,
     APP_CONTROL_RESULT_REJECTED,
     APP_CONTROL_RESULT_CHASSIS_ERROR,
-    APP_CONTROL_RESULT_ARM_ERROR,
     APP_CONTROL_RESULT_ODOM_ERROR,
     APP_CONTROL_RESULT_COMMAND_INVALID,
     APP_CONTROL_RESULT_UNSUPPORTED
@@ -32,41 +31,18 @@ typedef enum {
 void app_control_init(void);
 
 /**
- * @brief 执行 ManualChassisPcArm 控制分支
- * @details FS-iA10B 控制底盘, PC 主臂关节角控制机械臂
- * @return AppControlResult 执行结果
+ * @brief 执行 FS-iA10B 手动底盘控制
  */
-AppControlResult app_control_apply_manual_chassis_pc_arm(void);
+AppControlResult app_control_apply_manual_chassis(void);
 
 /**
- * @brief 执行 ManualArmFs 控制分支
- * @details FS-iA10B 控制机械臂, 底盘保持刹车
- * @return AppControlResult 执行结果
- */
-AppControlResult app_control_apply_manual_arm_fs(void);
-
-/**
- * @brief 执行 AutoPi 控制分支
- * @details Pi 控制底盘, yaw 和机械臂, 所有命令都要经过限幅, 新鲜度和安全检查
- * @return AppControlResult 执行结果
- */
-AppControlResult app_control_apply_auto_pi(void);
-
-/**
- * @brief 请求底盘进入刹车状态
- * @return AppControlResult 执行结果
+ * @brief 请求底盘进入驻车刹车状态
  */
 AppControlResult app_control_brake_chassis(void);
 
 /**
- * @brief 请求机械臂进入安全停止状态
- * @return AppControlResult 执行结果
- */
-AppControlResult app_control_stop_arm(void);
-
-/**
- * @brief 同时收口底盘和机械臂输出
- * @return AppControlResult 执行结果
+ * @brief 清零目标并立即请求电机停止
+ * @details 与驻车刹车和硬件急停分别处理
  */
 AppControlResult app_control_stop_all(void);
 

@@ -116,20 +116,6 @@
  * 用于避免前进/后退等效解在临界角附近抖动
  */
 #define CHASSIS_DRIVE_EQUIV_HYST_RAD 0.03f
-/**
- * @brief 转向电机上电准备重试间隔
- *
- * 单位为底盘控制周期；
- * 启动未收到反馈时会按该间隔重新发送准备序列
- */
-#define CHASSIS_STEER_PREPARE_RETRY_CYCLES 250u
-/**
- * @brief 驱动电机上电准备重试间隔
- *
- * 单位为底盘控制周期；
- * 启动未收到反馈时会按该间隔重新发送准备序列
- */
-#define CHASSIS_DRIVE_PREPARE_RETRY_CYCLES 250u
 
 /**
  * @brief 逻辑舵轮模块到物理 CAN 电机的映射关系
@@ -179,6 +165,7 @@ typedef struct {
  * 对外读取使用同步后的只读快照
  */
 static Chassis s_chassis = { 0 };
+static bool s_output_enabled = false;
 /**
  * @brief 对外暴露的底盘只读快照
  *
@@ -243,14 +230,12 @@ static const DjiMotorConfig s_drive_motor_dji_config = {
  * 单位为底盘控制周期；
  * 倒计时归零后会再次发送初始化准备序列
  */
-static uint16_t s_steer_prepare_retry_countdown = 0u;
 /**
  * @brief 驱动电机上电准备重试倒计时
  *
  * 单位为底盘控制周期；
  * 倒计时归零后会再次发送初始化准备序列
  */
-static uint16_t s_drive_prepare_retry_countdown = 0u;
 /**
  * @brief 上一次记录的转向反馈缺失掩码
  *
@@ -485,7 +470,7 @@ static void chassis_reset_steer_speed_profiles(void);
 static float chassis_calc_steer_track_speed(ChassisModule module, float target_angle);
 
 /**
- * @brief 在转向反馈缺失时重试上电准备序列
+ * @brief 维护转向和驱动反馈就绪状态
  *
  * 函数负责维护 ready 状态；
  * 未就绪时会要求底盘保持驱动输出为零
@@ -559,7 +544,7 @@ ChassisErrorCode chassis_init(const ChassisConfig* config) {
         return config_status;
     }
 
-    if(config->steer_motor_interface == NULL || config->drive_motor_interface == NULL || config->steer_ops == NULL || config->drive_ops == NULL || config->prepare_steer_motor == NULL || config->prepare_drive_motor == NULL) {
+    if(config->steer_motor_interface == NULL || config->drive_motor_interface == NULL || config->steer_ops == NULL || config->drive_ops == NULL || config->prepare_steer_motor == NULL || config->prepare_drive_motor == NULL || config->feedback_is_valid == NULL) {
         log_error("CHASSIS dependency missing before init");
         return ch.DEPENDENCY_MISSING;
     }
@@ -574,9 +559,8 @@ ChassisErrorCode chassis_init(const ChassisConfig* config) {
     s_chassis.brake_latched = false;
     s_chassis.steer_then_drive_enabled = true;
     s_chassis.initialized = false;
+    s_output_enabled = false;
     chassis_reset_steer_speed_profiles();
-    s_steer_prepare_retry_countdown = 0u;
-    s_drive_prepare_retry_countdown = 0u;
     s_last_steer_missing_mask = 0xFFu;
     s_last_drive_missing_mask = 0xFFu;
     s_chassis.steer_motor_ready = false;
@@ -604,13 +588,6 @@ ChassisErrorCode chassis_init(const ChassisConfig* config) {
         return ch.KINEMATICS_FAILED;
     }
 
-    if(chassis_prepare_steer_motors() != ch.OK) {
-        log_warn("CHASSIS initial steer prepare incomplete, will retry in process");
-    }
-    if(chassis_prepare_drive_motors() != ch.OK) {
-        log_warn("CHASSIS initial drive prepare incomplete, will retry in process");
-    }
-
     s_chassis.initialized = true;
     log_info("CHASSIS init done");
     return ch.OK;
@@ -624,6 +601,10 @@ ChassisErrorCode chassis_init(const ChassisConfig* config) {
  * @return ChassisErrorCode 状态码
  */
 ChassisErrorCode chassis_set_velocity(float vx, float vy, float wz) {
+    if(!s_output_enabled) {
+        return ch.NOT_INITIALIZED;
+    }
+
     float wz_for_ik;
 
     if(!s_chassis.initialized) {
@@ -658,6 +639,7 @@ ChassisErrorCode chassis_set_steer_then_drive_enabled(bool enabled) {
  */
 ChassisErrorCode chassis_process(void) {
     uint8_t i;
+    ChassisErrorCode result = ch.OK;
     bool steer_feedback_observed = true;
     bool drive_feedback_observed = true;
     uint8_t steer_missing_mask = 0u;
@@ -665,6 +647,10 @@ ChassisErrorCode chassis_process(void) {
 
     if(!s_chassis.initialized) {
         return ch.NOT_INITIALIZED;
+    }
+
+    if(!s_output_enabled) {
+        return chassis_stop();
     }
 
     for(i = 0u; i < CHASSIS_MODULE_COUNT; ++i) {
@@ -680,13 +666,19 @@ ChassisErrorCode chassis_process(void) {
         }
     }
 
+    if(!s_chassis.config.feedback_is_valid()) {
+        s_chassis.steer_motor_ready = false;
+        s_chassis.drive_motor_ready = false;
+        return chassis_stop();
+    }
+
     if(!chassis_maintain_motor_startup(steer_feedback_observed, steer_missing_mask,
                                        drive_feedback_observed, drive_missing_mask)) {
         s_chassis.kine.state.cur_vx = 0.0f;
         s_chassis.kine.state.cur_vy = 0.0f;
         s_chassis.kine.state.cur_wz = 0.0f;
         chassis_sync_view();
-        return ch.OK;
+        return chassis_stop();
     }
 
     for(i = 0u; i < CHASSIS_MODULE_COUNT; ++i) {
@@ -709,8 +701,12 @@ ChassisErrorCode chassis_process(void) {
                 float target_angle = s_module_cmd[map->module].steer_target_abs_angle;
                 float steer_speed = chassis_calc_steer_track_speed(map->module, target_angle);
 
-                (void)drive_motor.stop(map->drive_id);
-                (void)steer_motor.set_pos_vel(map->steer_id, target_angle, steer_speed);
+                if(drive_motor.stop(map->drive_id) != MOTOR_STATUS_OK) {
+                    result = ch.MOTOR_COMMAND_FAILED;
+                }
+                if(steer_motor.set_pos_vel(map->steer_id, target_angle, steer_speed) != MOTOR_STATUS_OK) {
+                    result = ch.MOTOR_COMMAND_FAILED;
+                }
             }
 
             if(chassis_brake_targets_reached()) {
@@ -722,8 +718,12 @@ ChassisErrorCode chassis_process(void) {
             for(i = 0u; i < CHASSIS_MODULE_COUNT; ++i) {
                 const ChassisModuleMap* map = &s_module_map[i];
 
-                (void)steer_motor.brake(map->steer_id);
-                (void)drive_motor.brake(map->drive_id);
+                if(steer_motor.brake(map->steer_id) != MOTOR_STATUS_OK) {
+                    result = ch.MOTOR_COMMAND_FAILED;
+                }
+                if(drive_motor.brake(map->drive_id) != MOTOR_STATUS_OK) {
+                    result = ch.MOTOR_COMMAND_FAILED;
+                }
             }
         }
 
@@ -755,8 +755,12 @@ ChassisErrorCode chassis_process(void) {
             float target_speed = chassis_wheel_omega_to_drive_omega(s_module_cmd[map->module].wheel_omega);
             float steer_speed = chassis_calc_steer_track_speed(map->module, target_angle);
 
-            (void)steer_motor.set_pos_vel(map->steer_id, target_angle, steer_speed);
-            (void)drive_motor.set_spd(map->drive_id, drive_ready ? ((float)map->drive_sign * target_speed) : 0.0f);
+            if(steer_motor.set_pos_vel(map->steer_id, target_angle, steer_speed) != MOTOR_STATUS_OK) {
+                result = ch.MOTOR_COMMAND_FAILED;
+            }
+            if(drive_motor.set_spd(map->drive_id, drive_ready ? ((float)map->drive_sign * target_speed) : 0.0f) != MOTOR_STATUS_OK) {
+                result = ch.MOTOR_COMMAND_FAILED;
+            }
         }
 
         if(swheel.fk(&s_chassis.kine) != swheel.OK) {
@@ -766,7 +770,10 @@ ChassisErrorCode chassis_process(void) {
 
     chassis_sync_view();
 
-    return ch.OK;
+    if(result != ch.OK) {
+        (void)chassis_stop();
+    }
+    return result;
 }
 
 /**
@@ -775,6 +782,7 @@ ChassisErrorCode chassis_process(void) {
  */
 ChassisErrorCode chassis_stop(void) {
     uint8_t i;
+    ChassisErrorCode result = ch.OK;
 
     if(!s_chassis.initialized) {
         return ch.NOT_INITIALIZED;
@@ -788,11 +796,38 @@ ChassisErrorCode chassis_stop(void) {
     chassis_reset_steer_speed_profiles();
 
     for(i = 0u; i < CHASSIS_MODULE_COUNT; ++i) {
-        (void)steer_motor.brake(s_module_map[i].steer_id);
-        (void)drive_motor.stop(s_module_map[i].drive_id);
+        if(steer_motor.brake(s_module_map[i].steer_id) != MOTOR_STATUS_OK) {
+            result = ch.MOTOR_COMMAND_FAILED;
+        }
+        if(drive_motor.stop(s_module_map[i].drive_id) != MOTOR_STATUS_OK) {
+            result = ch.MOTOR_COMMAND_FAILED;
+        }
     }
 
-    return ch.OK;
+    return result;
+}
+
+ChassisErrorCode chassis_set_output_enabled(bool enabled) {
+    if(!s_chassis.initialized) {
+        return ch.NOT_INITIALIZED;
+    }
+    if(enabled && !s_output_enabled) {
+        ChassisErrorCode status = chassis_stop();
+        if(status == ch.OK) {
+            status = chassis_prepare_steer_motors();
+        }
+        if(status == ch.OK) {
+            status = chassis_prepare_drive_motors();
+        }
+        if(status != ch.OK) {
+            (void)chassis_stop();
+            return status;
+        }
+        s_chassis.steer_motor_ready = false;
+        s_chassis.drive_motor_ready = false;
+    }
+    s_output_enabled = enabled;
+    return enabled ? ch.OK : chassis_stop();
 }
 
 /**
@@ -849,7 +884,8 @@ const SteerWheelControl* chassis_get_control(void) {
  * @return bool `true` 表示底盘就绪，`false` 表示仍在等待反馈
  */
 bool chassis_is_ready(void) {
-    return s_chassis.initialized && s_chassis.steer_motor_ready && s_chassis.drive_motor_ready;
+    return s_chassis.initialized && s_chassis.steer_motor_ready && s_chassis.drive_motor_ready &&
+           s_chassis.config.feedback_is_valid();
 }
 
 /**
@@ -881,7 +917,7 @@ static ChassisErrorCode chassis_check_config(const ChassisConfig* config) {
     if(config == NULL) {
         return ch.INVALID_PARAM;
     }
-    if(config->steer_motor_interface == NULL || config->drive_motor_interface == NULL || config->steer_ops == NULL || config->drive_ops == NULL || config->prepare_steer_motor == NULL || config->prepare_drive_motor == NULL || config->steer_ops->send == NULL || config->drive_ops->send == NULL) {
+    if(config->steer_motor_interface == NULL || config->drive_motor_interface == NULL || config->steer_ops == NULL || config->drive_ops == NULL || config->prepare_steer_motor == NULL || config->prepare_drive_motor == NULL || config->feedback_is_valid == NULL || config->steer_ops->send == NULL || config->drive_ops->send == NULL) {
         return ch.DEPENDENCY_MISSING;
     }
     if(config->model.length <= 0.0f || config->model.width <= 0.0f || config->model.wheel_radius <= 0.0f || config->model.max_wheel_linear_speed < 0.0f || config->wheel_drive_ratio <= 0.0f) {
@@ -895,7 +931,6 @@ static ChassisErrorCode chassis_check_config(const ChassisConfig* config) {
 }
 
 static ChassisErrorCode chassis_prepare_steer_motors(void) {
-    bool all_ok = true;
     uint8_t i;
 
     for(i = 0u; i < CHASSIS_MODULE_COUNT; ++i) {
@@ -903,18 +938,16 @@ static ChassisErrorCode chassis_prepare_steer_motors(void) {
 
         if(s_chassis.config.prepare_steer_motor(steer_id) != MOTOR_STATUS_OK) {
             log_warn("CHASSIS steer_id=%u prepare failed", steer_id);
-            all_ok = false;
-            continue;
+            return ch.STEER_PREPARE_FAILED;
         }
 
         log_info("CHASSIS steer_id=%u prepare ok", steer_id);
     }
 
-    return all_ok ? ch.OK : ch.STEER_PREPARE_FAILED;
+    return ch.OK;
 }
 
 static ChassisErrorCode chassis_prepare_drive_motors(void) {
-    bool all_ok = true;
     uint8_t i;
 
     for(i = 0u; i < CHASSIS_MODULE_COUNT; ++i) {
@@ -922,14 +955,13 @@ static ChassisErrorCode chassis_prepare_drive_motors(void) {
 
         if(s_chassis.config.prepare_drive_motor(drive_id) != MOTOR_STATUS_OK) {
             log_warn("CHASSIS drive_id=%u prepare failed", drive_id);
-            all_ok = false;
-            continue;
+            return ch.DRIVE_PREPARE_FAILED;
         }
 
         log_info("CHASSIS drive_id=%u prepare ok", drive_id);
     }
 
-    return all_ok ? ch.OK : ch.DRIVE_PREPARE_FAILED;
+    return ch.OK;
 }
 
 static bool chassis_maintain_motor_startup(bool steer_feedback_observed, uint8_t steer_missing_mask,
@@ -938,7 +970,6 @@ static bool chassis_maintain_motor_startup(bool steer_feedback_observed, uint8_t
         if(!s_chassis.steer_motor_ready) {
             log_info("CHASSIS steer motor ready");
         }
-        s_steer_prepare_retry_countdown = 0u;
         s_chassis.steer_motor_ready = true;
         s_last_steer_missing_mask = 0u;
     }
@@ -950,21 +981,12 @@ static bool chassis_maintain_motor_startup(bool steer_feedback_observed, uint8_t
             s_last_steer_missing_mask = steer_missing_mask;
         }
 
-        if(s_steer_prepare_retry_countdown > 0u) {
-            --s_steer_prepare_retry_countdown;
-        }
-        else {
-            log_warn("CHASSIS retry steer prepare, missing mask=0x%02X", steer_missing_mask);
-            (void)chassis_prepare_steer_motors();
-            s_steer_prepare_retry_countdown = CHASSIS_STEER_PREPARE_RETRY_CYCLES;
-        }
     }
 
     if(drive_feedback_observed) {
         if(!s_chassis.drive_motor_ready) {
             log_info("CHASSIS drive motor ready");
         }
-        s_drive_prepare_retry_countdown = 0u;
         s_chassis.drive_motor_ready = true;
         s_last_drive_missing_mask = 0u;
     }
@@ -976,14 +998,6 @@ static bool chassis_maintain_motor_startup(bool steer_feedback_observed, uint8_t
             s_last_drive_missing_mask = drive_missing_mask;
         }
 
-        if(s_drive_prepare_retry_countdown > 0u) {
-            --s_drive_prepare_retry_countdown;
-        }
-        else {
-            log_warn("CHASSIS retry drive prepare, missing mask=0x%02X", drive_missing_mask);
-            (void)chassis_prepare_drive_motors();
-            s_drive_prepare_retry_countdown = CHASSIS_DRIVE_PREPARE_RETRY_CYCLES;
-        }
     }
 
     return s_chassis.steer_motor_ready && s_chassis.drive_motor_ready;

@@ -31,12 +31,6 @@ void app_runtime_process(void);
 AppFsmStateId app_runtime_get_state(void);
 
 /**
- * @brief 获取当前 Manual 子模式
- * @return AppManualMode 当前 Manual 子模式
- */
-AppManualMode app_runtime_get_manual_mode(void);
-
-/**
  * @brief 获取当前锁存故障
  * @return const AppFault* 故障只读指针
  */
@@ -47,11 +41,5 @@ const AppFault* app_runtime_get_fault(void);
  * @return bool `true` 表示存在锁存故障
  */
 bool app_runtime_has_fault(void);
-
-/**
- * @brief 判断当前是否锁存了自动启动事件
- * @return bool `true` 表示锁存了自动启动事件
- */
-bool app_runtime_is_auto_start_latched(void);
 
 #endif

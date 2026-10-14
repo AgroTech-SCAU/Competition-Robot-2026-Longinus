@@ -3,6 +3,8 @@
 > 目标文件 `docs/plan.md`
 >
 > 执行原则 以 Longinus 真实工程验证 Standard 的当前 `main`，每次测试固定实际 Commit，公共问题回到 Standard 修复，不以预先发布 Release 作为开工条件
+>
+> Codex 执行范围按负责人要求限定为实现与静态验证，不执行编译，步骤完成以对应静态检查为准，编译与真机结果不得推定为通过
 
 # 1 本次唯一目标
 
@@ -37,7 +39,7 @@
 # 4 完成标准
 
 - [x] Longinus 基于 AgroTech Repository Template 创建，MCU 工程统一放在 `mcu/`
-- [ ] Longinus 不包含首版无关的 Atlas 机械臂、吸盘、PC、Pi、ASRPro 业务
+- [x] Longinus 不包含首版无关的 Atlas 机械臂、吸盘、PC、Pi、ASRPro 业务
 - [ ] Standard 以真正的 Git Submodule 引入，跟踪 `main` 用于人工更新，每个通过验证的 Longinus 检查点都指向确定的 SDK Commit
 - [ ] Longinus 编译时只使用 Standard 中所需的正式 SDK 模块，无重复符号或私有公共 SDK 副本
 - [ ] 四个 DM 转向与四个 DJI 驱动在正确 CAN 总线上完成初始化、命令下发及反馈读取
@@ -170,7 +172,7 @@ Longinus 远端仓库由负责人基于 AgroTech Repository Template 创建
 不要清理大量业务，也不要接入 Standard
 ```
 
-## 步骤 2 `[ ]` 收敛 Atlas 为纯遥控底盘 MCU
+## 步骤 2 `[x]` 收敛 Atlas 为纯遥控底盘 MCU
 
 **前置条件**
 
@@ -203,10 +205,20 @@ Longinus 远端仓库由负责人基于 AgroTech Repository Template 创建
 
 **最小验证**
 
-- [ ] MCU 构建通过
-- [ ] `remote -> app -> chassis` 控制链静态成立
-- [ ] 失联和故障路径静态到达安全停止
-- [ ] 无仍可达的非底盘业务
+- [x] 项目源码、构建引用和接口静态检查通过，未执行编译
+- [x] `remote -> app -> chassis` 控制链静态成立
+- [x] 失联和故障路径静态到达安全停止
+- [x] 无仍可达的非底盘业务
+
+**执行记录**
+
+- 删除非底盘 service 与对应装配文件，移除 app 中机械臂、吸盘、PC、Pi、ASRPro 分支，保留 Idle Manual Fault EStop 安全状态
+- 清理 UART7 UART8 USART10 与吸盘 GPIO，保留 UART5 遥控、USART1 日志、CAN、IMU、RGB 和时基依赖，Core 与 CubeMX 配置同步
+- 上电不自动准备电机，在线非手动选择后须摇杆回中再进入手动，失联及故障关闭输出门控并清零目标，恢复后须清故障并重新选择手动
+- 电机准备期间刷新遥控并检查输入，准备失败立即停止，启动等待反馈期间保持零目标且设置时限，装配层检查八电机反馈新鲜度与 DM 异常状态
+- 保留速度档、SWC、VRA、VRB、运动映射、等效角与 S 曲线，手动控制接管 yaw 目标锁定，停止后重新锁定当前朝向
+- `python3 /tmp/longinus-step2-static.py` 通过项目头引用、词法结构、业务清理、保留算法、外设配置和安全调用链检查，`git diff --check` 通过，安全路径静态审查未发现阻塞问题
+- 未执行编译与真机验证，反馈超时阈值及实际停车效果待设备验收，未接入 Standard
 
 **Codex Prompt**
 
@@ -214,7 +226,7 @@ Longinus 远端仓库由负责人基于 AgroTech Repository Template 创建
 读取 Longinus 当前 app remote chassis entry 和 CubeMX
 只删除 Longinus 首版不用的 Atlas 业务和依赖
 尽量原样保留手动控制与失联保护的实际逻辑
-完成后编译并检查遥控输入到驱动控制及失联停止的完整调用链
+完成后静态检查遥控输入到驱动控制及失联停止的完整调用链
 不要迁移 Standard 驱动
 ```
 
@@ -222,7 +234,7 @@ Longinus 远端仓库由负责人基于 AgroTech Repository Template 创建
 
 **前置条件**
 
-步骤 2 的 MCU 构建和静态安全链通过
+步骤 2 的项目源码、构建引用和静态安全链检查通过
 
 **目标**
 
@@ -447,14 +459,14 @@ git submodule status
 
 # 11 当前立即执行
 
-步骤 1 已完成，接下来执行步骤 2，收敛为纯遥控底盘 MCU 并静态验证控制链和安全停止路径
+步骤 2 已完成，接下来执行步骤 3，引入 Standard 子模块并逐模块静态验证依赖迁移
 
 # 12 进度统计
 
 | 步骤 | 任务 | 状态 |
 |---:|---|:---:|
 | 1 | 创建 Longinus 并抽离 MCU 基线，静态验证通过 | [x] |
-| 2 | 删除非底盘业务 | [ ] |
+| 2 | 删除非底盘业务，静态验证通过 | [x] |
 | 3 | 引入 Standard main 子模块与公共模块迁移 | [ ] |
 | 4 | 迁移 DM DJI 到新版 bus_motor | [ ] |
 | 5 | 遥控真机验收和 SDK Commit 冻结 | [ ] |

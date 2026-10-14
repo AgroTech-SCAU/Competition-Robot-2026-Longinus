@@ -8,15 +8,11 @@
 
 #include "app_runtime.h"
 #include "app_status.h"
-#include "arm.h"
-#include "asr_comms.h"
 #include "assemble/assemble.h"
 #include "chassis.h"
 #include "delay.h"
 #include "log.h"
 #include "odom.h"
-#include "pc_comms.h"
-#include "pi_comms.h"
 #include "remote.h"
 
 #include <stdbool.h>
@@ -39,21 +35,6 @@ static uint8_t s_entry_250hz_tick = 0u;
  */
 static uint8_t s_entry_100hz_tick = 0u;
 
-/**
- * @brief 50Hz 节拍计数器
- */
-static uint8_t s_entry_50hz_tick = 0u;
-
-/**
- * @brief 机械臂反馈刷新异常日志节流计时器
- */
-static ms_t s_entry_arm_refresh_log_timer = 0u;
-
-/**
- * @brief 机械臂反馈刷新连续失败计数
- */
-static uint16_t s_entry_arm_refresh_fail_count = 0u;
-
 // ! ========================= 私 有 函 数 声 明 ========================= ! //
 
 /**
@@ -67,12 +48,6 @@ static inline bool entry_tick_250hz(void);
  * @return bool `true` 表示应执行 100Hz 任务
  */
 static inline bool entry_tick_100hz(void);
-
-/**
- * @brief 判断当前 500Hz 周期是否命中 50Hz 节拍
- * @return bool `true` 表示应执行 50Hz 任务
- */
-static inline bool entry_tick_50hz(void);
 
 // ! ========================= 接 口 函 数 实 现 ========================= ! //
 
@@ -109,16 +84,6 @@ static inline void entry_init(void) {
     log_info("BOOT chassis ready");
     delay_ms(100u);
 
-    if(assemble_arm() != SYSTEM_STATUS_OK)
-        return;
-    log_info("BOOT arm ready");
-    delay_ms(100u);
-
-    if(assemble_suction() != SYSTEM_STATUS_OK)
-        return;
-    log_info("BOOT suction ready");
-    delay_ms(100u);
-
     if(assemble_remote() != SYSTEM_STATUS_OK)
         return;
     log_info("BOOT remote ready");
@@ -126,15 +91,6 @@ static inline void entry_init(void) {
 
     {
         remote_init();
-
-        if(assemble_pc_comms() != SYSTEM_STATUS_OK)
-            return;
-
-        if(assemble_pi_comms() != SYSTEM_STATUS_OK)
-            return;
-
-        if(assemble_asr_comms() != SYSTEM_STATUS_OK)
-            return;
 
         app_runtime_init();
         app_status_init();
@@ -155,58 +111,22 @@ static inline void entry_init(void) {
 
 /**
  * @brief 主循环调度入口
- * @details
- *
- * 500Hz base order:
- * 1. chassis.process()
- * 2. 250Hz slot: odom.process()
- * 3. 100Hz slot: remote_process() -> pc_comms_process() -> pi_comms_process() -> asr_comms_process()
- * 4. 50Hz slot: arm.refresh_current_state()
- * 5. app_runtime_process()
- *
- * background:
- * - app_status_process()
+ * @details 100Hz 遥控输入和 250Hz 里程计更新后，500Hz 运行时先检查安全再执行底盘输出
  */
 static inline void entry_loop(void) {
     if(!init_ok) {
         return;
     }
-
     if(tim6_500hz_flag) {
         tim6_500hz_flag = false;
-
-        chassis.process();
-
         if(entry_tick_250hz()) {
             odom.process();
         }
-
         if(entry_tick_100hz()) {
             remote_process();
-            pc_comms_process();
-            pi_comms_process();
-            asr_comms_process();
         }
-
-        if(entry_tick_50hz()) {
-            ArmStatus arm_status = arm.refresh_current_state();
-
-            if(arm_status == ARM_OK) {
-                s_entry_arm_refresh_fail_count = 0u;
-            }
-            else {
-                s_entry_arm_refresh_fail_count++;
-                if(s_entry_arm_refresh_fail_count >= 10u && delay_nb_ms(&s_entry_arm_refresh_log_timer, 1000u)) {
-                    log_warn("ARM refresh unstable: %s, consecutive=%u",
-                             arm.status_str(arm_status),
-                             s_entry_arm_refresh_fail_count);
-                }
-            }
-        }
-
         app_runtime_process();
     }
-
     app_status_process();
 }
 
@@ -220,11 +140,6 @@ static inline bool entry_tick_250hz(void) {
 static inline bool entry_tick_100hz(void) {
     s_entry_100hz_tick = (uint8_t)((s_entry_100hz_tick + 1u) % 5u);
     return s_entry_100hz_tick == 0u;
-}
-
-static inline bool entry_tick_50hz(void) {
-    s_entry_50hz_tick = (uint8_t)((s_entry_50hz_tick + 1u) % 10u);
-    return s_entry_50hz_tick == 0u;
 }
 
 #endif

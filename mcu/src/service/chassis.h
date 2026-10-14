@@ -31,6 +31,7 @@
     X(STEER_PREPARE_FAILED, "Steer Motor Prepare Failed") \
     X(DRIVE_PREPARE_FAILED, "Drive Motor Prepare Failed") \
     X(KINEMATICS_FAILED, "Steer Wheel Kinematics Failed") \
+    X(MOTOR_COMMAND_FAILED, "Motor Command Failed")       \
     X(NOT_INITIALIZED, "Chassis Not Initialized")
 
 /**
@@ -102,6 +103,9 @@ typedef struct {
     const BusMotorPortOps* drive_ops;
     BusMotorStatus (*prepare_steer_motor)(uint16_t id);
     BusMotorStatus (*prepare_drive_motor)(uint16_t id);
+
+    /** @brief 项目级反馈新鲜度与设备状态检查 */
+    bool (*feedback_is_valid)(void);
     SteerWheelModel model;
     float wheel_drive_ratio;
     ChassisSteerTargetMode steer_target_mode;
@@ -251,6 +255,12 @@ ChassisErrorCode chassis_process(void);
  * @return ChassisErrorCode 状态码
  */
 ChassisErrorCode chassis_stop(void);
+
+/**
+ * @brief 控制运行时是否允许电机准备和底盘输出
+ * @details 关闭时清零并请求停止，不能替代硬件急停
+ */
+ChassisErrorCode chassis_set_output_enabled(bool enabled);
 
 /**
  * @brief 请求底盘进入驻车刹车状态
