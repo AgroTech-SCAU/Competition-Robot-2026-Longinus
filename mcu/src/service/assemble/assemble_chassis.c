@@ -6,44 +6,36 @@
 #include "chassis.h"
 #include "delay.h"
 #include "log.h"
-#include "remote.h"
 #include "stm32_hal_can.h"
 
-#include <stdlib.h>
 #include <string.h>
 
 #define CHASSIS_FEEDBACK_TIMEOUT_MS 100u
 #define CHASSIS_DRIVE_GROUP 1u
 #define CHASSIS_RX_QUEUE_COUNT 64u
+#define CHASSIS_MOTOR_COUNT (2u * CHASSIS_MODULE_COUNT)
 
-/* These are the same motors used by Atlas. Keep its proven wire codec
-   ranges independently of the POS_VEL float-command speed limit. */
+/* Proven Atlas wire ranges are independent of the POS_VEL speed command */
 static const DmMotorLimitParam s_steer_codec_limits = {
-    .q_max = 12.5f,
-    .dq_max = 10.0f,
-    .tau_max = 28.0f,
+    .q_max = 12.5f, .dq_max = 10.0f, .tau_max = 28.0f,
 };
-
-/* IDs 1..4 reply on master IDs 0x11..0x14, verified on the chassis. */
 static const DmMotorConfig s_steer_config[CHASSIS_MODULE_COUNT] = {
 #define STEER_CONFIG(id) { .can_id = (id), .master_id = (0x10u + (id)), .model = DM_MOTOR_MODEL_CUSTOM, .firmware = { .major = DM_MOTOR_FIRMWARE_V3 }, .default_mode = DM_MOTOR_MODE_POS_VEL, .feedback_timeout_ms = CHASSIS_FEEDBACK_TIMEOUT_MS, .limits_override = &s_steer_codec_limits, .pos_vel_max_speed_rad_s = 12.56f }
-    STEER_CONFIG(1u),
-    STEER_CONFIG(2u),
-    STEER_CONFIG(3u),
-    STEER_CONFIG(4u),
+    STEER_CONFIG(1u), STEER_CONFIG(2u), STEER_CONFIG(3u), STEER_CONFIG(4u),
 #undef STEER_CONFIG
 };
-
+static const BusMotorId s_steer_ids[CHASSIS_MODULE_COUNT] = { 1u, 2u, 3u, 4u };
+static const BusMotorId s_drive_ids[CHASSIS_MODULE_COUNT] = { 5u, 6u, 7u, 8u };
 static DmMotorInstance s_steer_instances[CHASSIS_MODULE_COUNT];
 static DjiMotorInstance s_drive_instances[CHASSIS_MODULE_COUNT];
-static const BusMotorId s_drive_ids[CHASSIS_MODULE_COUNT] = { 5u, 6u, 7u, 8u };
+static DmMotorBus s_steer_bus;
+static DjiMotorBus s_drive_bus;
 
 typedef struct {
     uint32_t id;
     uint32_t stamp_ms;
     uint8_t data[8];
 } ChassisRxFrame;
-
 typedef struct {
     ChassisRxFrame frames[CHASSIS_RX_QUEUE_COUNT];
     volatile uint8_t read;
@@ -51,46 +43,64 @@ typedef struct {
     volatile bool overflow;
 } ChassisRxQueue;
 
+typedef enum {
+    PREPARE_CLEAR = 0, PREPARE_DISABLE, PREPARE_ACTIVATE,
+    PREPARE_POSITION, PREPARE_ZERO_TARGET, PREPARE_ENABLE,
+    PREPARE_ENABLED_FEEDBACK, PREPARE_DONE,
+} ChassisPreparePhase;
+typedef struct {
+    ChassisPreparePhase phase;
+    uint32_t since_ms;
+    uint32_t feedback_sequence;
+    float position;
+} ChassisPrepareState;
+
 static ChassisRxQueue s_steer_rx;
 static ChassisRxQueue s_drive_rx;
-/* First raw steering replies, retained for board/protocol diagnostics. */
-static volatile struct {
-    uint32_t count;
-    ChassisRxFrame frames[16];
-} s_steer_rx_trace;
-static uint32_t s_feedback_ms[8];
-static bool s_feedback_seen[8];
-static volatile bool s_registry_ready = false;
+static ChassisPrepareState s_steer_prepare[CHASSIS_MODULE_COUNT];
+static ChassisPrepareState s_drive_prepare[CHASSIS_MODULE_COUNT];
+/* Raw startup trace is diagnostic data; the ISR never parses a protocol */
+static volatile struct { uint32_t count; ChassisRxFrame frames[16]; } s_steer_rx_trace;
+static uint32_t s_feedback_ms[CHASSIS_MOTOR_COUNT];
+static uint32_t s_feedback_sequence[CHASSIS_MOTOR_COUNT];
+static bool s_feedback_seen[CHASSIS_MOTOR_COUNT];
+static volatile bool s_registry_ready;
 static BusMotorStatus s_receive_error = MOTOR_STATUS_OK;
-static volatile uint32_t s_steer_rx_mismatch_count;
+static uint32_t s_steer_rx_mismatch_count;
 
-static bool chassis_steer_can_send(uint32_t id, const uint8_t* data, uint8_t len);
-static bool chassis_drive_can_send(uint32_t id, const uint8_t* data, uint8_t len);
-static void chassis_motor_delay(uint32_t ms);
-static bool chassis_prepare_allowed(void);
-static bool chassis_feedback_is_valid(void);
-static BusMotorStatus chassis_motor_update(void);
-static void chassis_reset_transport(void);
-static BusMotorStatus chassis_cancel_pending_commands(void);
+static BusMotorStatus chassis_can_status(BspCanStatus status);
+static BusMotorStatus chassis_can_send(void* context, uint32_t id, const uint8_t* data, uint8_t len);
+static uint32_t chassis_now_ms(void* context);
 static BusMotorStatus chassis_receive_feedback(void);
+static BusMotorStatus chassis_motor_update(void);
+static BusMotorStatus chassis_disable_drive_motors(void);
+static bool chassis_feedback_is_valid(void);
+static BusMotorStatus chassis_cancel_pending_commands(void);
+static void chassis_reset_transport(void);
 static BusMotorStatus chassis_prepare_steer_motor(BusMotorId id);
 static BusMotorStatus chassis_prepare_drive_motor(BusMotorId id);
-static BusMotorStatus chassis_wait_feedback(BusMotorId id, BusMotorFeedback* feedback);
 static BusMotorStatus chassis_set_steer_target(BusMotorId id, float position, float velocity);
-static void chassis_queue_push(ChassisRxQueue* queue, uint32_t id, const uint8_t data[8]);
-static bool chassis_queue_pop(ChassisRxQueue* queue, ChassisRxFrame* frame);
-static void chassis_steer_can_rx_callback(FDCAN_HandleTypeDef* hcan, const FDCAN_RxHeaderTypeDef* header, const uint8_t data[8], void* user);
-static void chassis_drive_can_rx_callback(FDCAN_HandleTypeDef* hcan, const FDCAN_RxHeaderTypeDef* header, const uint8_t data[8], void* user);
+static void chassis_steer_can_rx_callback(FDCAN_HandleTypeDef*, const FDCAN_RxHeaderTypeDef*, const uint8_t data[8], void*);
+static void chassis_drive_can_rx_callback(FDCAN_HandleTypeDef*, const FDCAN_RxHeaderTypeDef*, const uint8_t data[8], void*);
 
 static const BusMotorPortOps s_steer_ops = {
-    .send = chassis_steer_can_send,
-    .now_ms = HAL_GetTick,
-    .delay_ms = chassis_motor_delay,
+    .context = &hfdcan1, .send_frame = chassis_can_send, .clock_ms = chassis_now_ms,
 };
 static const BusMotorPortOps s_drive_ops = {
-    .send = chassis_drive_can_send,
-    .now_ms = HAL_GetTick,
+    .context = &hfdcan2, .send_frame = chassis_can_send, .clock_ms = chassis_now_ms,
 };
+
+/* Boot may wait for board settling, explicitly servicing the RX queue
+ * This is not a driver delay callback and never runs application policy */
+static BusMotorStatus chassis_boot_settle(uint32_t ms) {
+    const uint32_t start = HAL_GetTick();
+    while((uint32_t)(HAL_GetTick() - start) < ms) {
+        delay_ms(1u);
+        BusMotorStatus status = chassis_receive_feedback();
+        if(status != MOTOR_STATUS_OK) return status;
+    }
+    return MOTOR_STATUS_OK;
+}
 
 SystemStatus assemble_chassis(void) {
     ChassisConfig config = {
@@ -100,7 +110,7 @@ SystemStatus assemble_chassis(void) {
         .motor_update = chassis_motor_update,
         .motor_poll_feedback = chassis_receive_feedback,
         .cancel_pending_commands = chassis_cancel_pending_commands,
-        .disable_drive_motors = dji_motor_disable_all,
+        .disable_drive_motors = chassis_disable_drive_motors,
         .clear_motor_fault = chassis_reset_transport,
         .drive_group = CHASSIS_DRIVE_GROUP,
         .drive_sign = { 1, -1, -1, 1 },
@@ -111,41 +121,35 @@ SystemStatus assemble_chassis(void) {
         .yaw_bias = { .enabled = true, .k_vx = -0.049f, .k_vy = 0.055f, .v_deadband = 0.01f },
     };
     BusMotorStatus status;
-
     log_info("CHASSIS assemble begin");
     s_registry_ready = false;
+    memcpy(config.steer_ids, s_steer_ids, sizeof(s_steer_ids));
+    memcpy(config.drive_ids, s_drive_ids, sizeof(s_drive_ids));
     if(bus_motor.init() != MOTOR_STATUS_OK ||
-       dm_motor_init(&s_steer_ops, s_steer_instances, CHASSIS_MODULE_COUNT) != MOTOR_STATUS_OK ||
-       dji_motor_init(&s_drive_ops, s_drive_instances, CHASSIS_MODULE_COUNT) != MOTOR_STATUS_OK) {
+       dm_motor_bus_init(&s_steer_bus, &s_steer_ops, s_steer_instances, CHASSIS_MODULE_COUNT) != MOTOR_STATUS_OK ||
+       dji_motor_bus_init(&s_drive_bus, &s_drive_ops, s_drive_instances, CHASSIS_MODULE_COUNT) != MOTOR_STATUS_OK)
         return SYSTEM_STATUS_ERROR;
-    }
     for(uint8_t i = 0u; i < CHASSIS_MODULE_COUNT; ++i) {
         const DjiMotorConfig drive_config = {
-            .can_id = i + 1u,
-            .model = DJI_MOTOR_MODEL_M2006,
+            .can_id = i + 1u, .model = DJI_MOTOR_MODEL_M2006,
             .feedback_timeout_ms = CHASSIS_FEEDBACK_TIMEOUT_MS,
-            .current_limit_a = 10.0f,
-            .velocity_limit_rad_s = 60.0f,
+            .current_limit_a = 10.0f, .velocity_limit_rad_s = 60.0f,
             .control_period_s = 0.002f,
-            /* Atlas RPM/current-command gains converted to output rad/s and A */
+            /* Atlas RPM/current gains converted to output rad/s and A */
             .kp = 8.0f * 36.0f * 60.0f / (6.28318530718f * 1000.0f),
             .ki = 0.1f * 36.0f * 60.0f / (6.28318530718f * 1000.0f * 0.002f),
-            .kd = 0.0f,
-            .feedback_current_a_per_lsb = 0.0f,
+            .kd = 0.0f, .feedback_current_a_per_lsb = 0.0f,
         };
-        status = dm_motor_bind(i + 1u, &s_steer_config[i]);
+        status = dm_motor_bus_bind(&s_steer_bus, s_steer_ids[i], &s_steer_config[i]);
         if(status == MOTOR_STATUS_OK)
-            status = dji_motor_bind(s_drive_ids[i], &drive_config);
+            status = dji_motor_bus_bind(&s_drive_bus, s_drive_ids[i], &drive_config);
         if(status != MOTOR_STATUS_OK) {
             log_error("CHASSIS bind failed: wheel=%u status=%s", i, bus_motor.status_str(status));
             return SYSTEM_STATUS_ERROR;
         }
     }
-    status = bus_motor.group.bind(CHASSIS_DRIVE_GROUP, s_drive_ids, CHASSIS_MODULE_COUNT);
-    if(status != MOTOR_STATUS_OK)
+    if(bus_motor.group.bind(CHASSIS_DRIVE_GROUP, s_drive_ids, CHASSIS_MODULE_COUNT) != MOTOR_STATUS_OK)
         return SYSTEM_STATUS_ERROR;
-
-    /* All instances exist before RX can deliver parameter ACKs or feedback */
     if(can_register_rx_callback(&hfdcan1, chassis_steer_can_rx_callback, NULL) != STM32_HAL_CAN_OK ||
        can_register_rx_callback(&hfdcan2, chassis_drive_can_rx_callback, NULL) != STM32_HAL_CAN_OK ||
        can_filter_init() != STM32_HAL_CAN_OK)
@@ -155,45 +159,60 @@ SystemStatus assemble_chassis(void) {
         s_registry_ready = false;
         return SYSTEM_STATUS_ERROR;
     }
-    /* Match Atlas: let both transceivers settle before the first motor frame. */
-    chassis_motor_delay(100u);
-
-    /* Attempt every disable even if one device or port reports failure */
+    if(chassis_boot_settle(100u) != MOTOR_STATUS_OK) return SYSTEM_STATUS_ERROR;
     status = MOTOR_STATUS_OK;
-    for(BusMotorId id = 1u; id <= 4u; ++id) {
-        const BusMotorStatus disabled = bus_motor.basic.disable(id);
+    for(uint8_t i = 0u; i < CHASSIS_MODULE_COUNT; ++i) {
+        const BusMotorStatus disabled = bus_motor.basic.disable(s_steer_ids[i]);
         if(disabled != MOTOR_STATUS_OK) {
-            log_error("CHASSIS boot disable failed: id=%u status=%s", id, bus_motor.status_str(disabled));
-            status = disabled;
+            log_error("CHASSIS boot disable failed: id=%u status=%s", s_steer_ids[i], bus_motor.status_str(disabled));
+            if(status == MOTOR_STATUS_OK) status = disabled;
         }
     }
-    const BusMotorStatus drive_disabled = dji_motor_disable_all();
-    if(drive_disabled != MOTOR_STATUS_OK) {
-        log_error("CHASSIS boot disable drive bank failed: %s", bus_motor.status_str(drive_disabled));
-        status = drive_disabled;
-    }
-    if(status != MOTOR_STATUS_OK)
+    const BusMotorStatus drive_disabled = chassis_disable_drive_motors();
+    if(status != MOTOR_STATUS_OK || drive_disabled != MOTOR_STATUS_OK) return SYSTEM_STATUS_ERROR;
+    if(chassis_init(&config) != CHASSIS_OK || chassis_set_output_enabled(false) != CHASSIS_OK)
         return SYSTEM_STATUS_ERROR;
-    if(chassis_init(&config) != CHASSIS_OK || chassis_set_output_enabled(false) != CHASSIS_OK) {
-        return SYSTEM_STATUS_ERROR;
-    }
     log_info("CHASSIS service init ok");
     return SYSTEM_STATUS_OK;
 }
 
-static bool chassis_steer_can_send(uint32_t id, const uint8_t* data, uint8_t len) {
-    return can_send(&hfdcan1, id, data, len) == STM32_HAL_CAN_OK;
+static BusMotorStatus chassis_can_status(BspCanStatus status) {
+    switch(status) {
+        case STM32_HAL_CAN_OK: return MOTOR_STATUS_OK;
+        case STM32_HAL_CAN_INVALID_PARAM:
+        case STM32_HAL_CAN_INVALID_DLC: return MOTOR_STATUS_INVALID_PARAM;
+        case STM32_HAL_CAN_TX_FIFO_FULL: return MOTOR_STATUS_TX_FULL;
+        case STM32_HAL_CAN_TX_MAILBOX_TIMEOUT: return MOTOR_STATUS_TIMEOUT;
+        case STM32_HAL_CAN_TX_CANCEL_FAILED: return MOTOR_STATUS_CANCELLED;
+        default: return MOTOR_STATUS_PORT_ERROR;
+    }
 }
-static bool chassis_drive_can_send(uint32_t id, const uint8_t* data, uint8_t len) {
-    return can_send(&hfdcan2, id, data, len) == STM32_HAL_CAN_OK;
+static BusMotorStatus chassis_can_send(void* context, uint32_t id, const uint8_t* data, uint8_t len) {
+    FDCAN_HandleTypeDef* hcan = (FDCAN_HandleTypeDef*)context;
+    const BspCanStatus sent = can_send(hcan, id, data, len);
+    if(sent != STM32_HAL_CAN_OK) {
+        BspCanDiagnostics diagnostic = { 0 };
+        if(can_get_diagnostics(hcan, &diagnostic) == STM32_HAL_CAN_OK && diagnostic.bus_off)
+            return MOTOR_STATUS_BUS_OFF;
+    }
+    return chassis_can_status(sent);
 }
+static uint32_t chassis_now_ms(void* context) { (void)context; return HAL_GetTick(); }
 
+static int chassis_motor_slot(BusMotorId id) {
+    for(uint8_t i = 0u; i < CHASSIS_MODULE_COUNT; ++i) {
+        if(id == s_steer_ids[i]) return i;
+        if(id == s_drive_ids[i]) return CHASSIS_MODULE_COUNT + i;
+    }
+    return -1;
+}
+static int chassis_role_index(const BusMotorId ids[CHASSIS_MODULE_COUNT], BusMotorId id) {
+    for(uint8_t i = 0u; i < CHASSIS_MODULE_COUNT; ++i) if(ids[i] == id) return i;
+    return -1;
+}
 static void chassis_queue_push(ChassisRxQueue* queue, uint32_t id, const uint8_t data[8]) {
     const uint8_t next = (queue->write + 1u) % CHASSIS_RX_QUEUE_COUNT;
-    if(next == queue->read) {
-        queue->overflow = true;
-        return;
-    }
+    if(next == queue->read) { queue->overflow = true; return; }
     ChassisRxFrame* frame = &queue->frames[queue->write];
     frame->id = id;
     frame->stamp_ms = HAL_GetTick();
@@ -201,223 +220,213 @@ static void chassis_queue_push(ChassisRxQueue* queue, uint32_t id, const uint8_t
     __DMB();
     queue->write = next;
 }
-
 static bool chassis_queue_pop(ChassisRxQueue* queue, ChassisRxFrame* frame) {
     const uint32_t irq_state = can_critical_enter();
-    if(queue->read == queue->write) {
-        can_critical_exit(irq_state);
-        return false;
-    }
+    if(queue->read == queue->write) { can_critical_exit(irq_state); return false; }
     *frame = queue->frames[queue->read];
     queue->read = (queue->read + 1u) % CHASSIS_RX_QUEUE_COUNT;
     can_critical_exit(irq_state);
     return true;
 }
-
 static BusMotorStatus chassis_receive_feedback(void) {
     ChassisRxFrame frame;
-    BusMotorFeedback feedback;
-    BusMotorStatus status;
-
-    if(s_steer_rx.overflow || s_drive_rx.overflow)
-        s_receive_error = MOTOR_STATUS_PORT_ERROR;
+    if(s_steer_rx.overflow || s_drive_rx.overflow) s_receive_error = MOTOR_STATUS_PORT_ERROR;
     for(uint8_t bus = 0u; bus < 2u; ++bus) {
         ChassisRxQueue* queue = bus == 0u ? &s_steer_rx : &s_drive_rx;
         while(chassis_queue_pop(queue, &frame)) {
+            BusMotorFeedback feedback;
+            bool is_feedback = true;
             if((uint32_t)(HAL_GetTick() - frame.stamp_ms) >= CHASSIS_FEEDBACK_TIMEOUT_MS) {
                 s_receive_error = MOTOR_STATUS_TIMEOUT;
                 continue;
             }
-            status = bus == 0u ? dm_motor_parse_feedback_frame(frame.id, frame.data, &feedback)
-                               : dji_motor_parse_feedback_frame(frame.id, frame.data, &feedback);
-            if(status == MOTOR_STATUS_OK && feedback.id >= 1u && feedback.id <= 8u) {
-                s_feedback_ms[feedback.id - 1u] = frame.stamp_ms;
-                s_feedback_seen[feedback.id - 1u] = true;
+            BusMotorStatus status = bus == 0u
+                ? dm_motor_bus_receive_at(&s_steer_bus, frame.id, frame.data, sizeof(frame.data), frame.stamp_ms, &feedback, &is_feedback)
+                : dji_motor_bus_parse_feedback_frame_at(&s_drive_bus, frame.id, frame.data, frame.stamp_ms, &feedback);
+            if(status == MOTOR_STATUS_OK && is_feedback) {
+                const int slot = chassis_motor_slot(feedback.id);
+                if(slot >= 0) {
+                    s_feedback_ms[slot] = frame.stamp_ms;
+                    s_feedback_seen[slot] = true;
+                    ++s_feedback_sequence[slot];
+                }
             }
-            else if(status != MOTOR_STATUS_ID_MISMATCH) {
-                s_receive_error = status;
+            else if(status == MOTOR_STATUS_ID_MISMATCH || status == MOTOR_STATUS_NOT_FOUND) {
+                if(bus == 0u) ++s_steer_rx_mismatch_count;
             }
+            else if(status != MOTOR_STATUS_OK) s_receive_error = status;
         }
     }
     return s_receive_error;
 }
-
 static BusMotorStatus chassis_motor_update(void) {
     const BusMotorStatus received = chassis_receive_feedback();
-    const BusMotorStatus updated = dji_motor_update();
+    const BusMotorStatus updated = dji_motor_bus_update(&s_drive_bus);
     return received != MOTOR_STATUS_OK ? received : updated;
 }
-
+static BusMotorStatus chassis_disable_drive_motors(void) { return dji_motor_bus_disable_all(&s_drive_bus); }
 static bool chassis_feedback_is_valid(void) {
-    BusMotorFeedback feedback;
-    if(s_receive_error != MOTOR_STATUS_OK)
-        return false;
-    for(BusMotorId id = 1u; id <= 8u; ++id) {
-        if(!s_feedback_seen[id - 1u] ||
-           (uint32_t)(HAL_GetTick() - s_feedback_ms[id - 1u]) >= CHASSIS_FEEDBACK_TIMEOUT_MS ||
-           bus_motor.feedback.all(id, &feedback) != MOTOR_STATUS_OK || (id <= 4u && feedback.error_code != 1u) ||
-           bus_motor.profile.current(id) != (id <= 4u ? BUS_MOTOR_PROFILE_POSITION : BUS_MOTOR_PROFILE_VELOCITY))
-            return false;
+    if(s_receive_error != MOTOR_STATUS_OK) return false;
+    for(uint8_t role = 0u; role < 2u; ++role) {
+        const BusMotorId* ids = role == 0u ? s_steer_ids : s_drive_ids;
+        const BusMotorProfile profile = role == 0u ? BUS_MOTOR_PROFILE_POSITION : BUS_MOTOR_PROFILE_VELOCITY;
+        for(uint8_t i = 0u; i < CHASSIS_MODULE_COUNT; ++i) {
+            const uint8_t slot = role * CHASSIS_MODULE_COUNT + i;
+            BusMotorFeedback feedback;
+            if(!s_feedback_seen[slot] ||
+               (uint32_t)(HAL_GetTick() - s_feedback_ms[slot]) >= CHASSIS_FEEDBACK_TIMEOUT_MS ||
+               bus_motor.feedback.all(ids[i], &feedback) != MOTOR_STATUS_OK ||
+               (feedback.valid & BUS_MOTOR_FEEDBACK_STATE) == 0u || feedback.state != BUS_MOTOR_STATE_ENABLED ||
+               bus_motor.profile.current(ids[i]) != profile) return false;
+        }
     }
     return true;
 }
 
-static void chassis_motor_delay(uint32_t ms) {
-    const uint32_t start = HAL_GetTick();
-    while((uint32_t)(HAL_GetTick() - start) < ms) {
-        delay_ms(1u);
-        remote_process();
-        (void)chassis_receive_feedback();
-    }
+/* No callback below blocks or services unrelated application work */
+static BusMotorStatus chassis_prepare_feedback(BusMotorId id, BusMotorFeedback* feedback) {
+    const int slot = chassis_motor_slot(id);
+    if(s_receive_error != MOTOR_STATUS_OK) return s_receive_error;
+    if(slot < 0) return MOTOR_STATUS_NOT_FOUND;
+    BusMotorStatus status = bus_motor.feedback.all(id, feedback);
+    if(status != MOTOR_STATUS_OK) return status;
+    if(!s_feedback_seen[slot] ||
+       (uint32_t)(HAL_GetTick() - s_feedback_ms[slot]) >= CHASSIS_FEEDBACK_TIMEOUT_MS)
+        return MOTOR_STATUS_NO_FEEDBACK;
+    if((feedback->valid & BUS_MOTOR_FEEDBACK_STATE) == 0u || feedback->state == BUS_MOTOR_STATE_UNKNOWN)
+        return MOTOR_STATUS_NO_FEEDBACK;
+    return feedback->state == BUS_MOTOR_STATE_FAULT ? MOTOR_STATUS_ERROR : MOTOR_STATUS_OK;
 }
-
-static bool chassis_prepare_allowed(void) {
-    const FsIa10bData* data;
-    remote_process();
-    data = remote_get_raw_data();
-    return s_receive_error == MOTOR_STATUS_OK && remote_is_manual_requested() && data != NULL &&
-           abs((int)data->channel[REMOTE_CH_RIGHT_X] - (int)REMOTE_CENTER) <= REMOTE_DEADBAND &&
-           abs((int)data->channel[REMOTE_CH_RIGHT_Y] - (int)REMOTE_CENTER) <= REMOTE_DEADBAND &&
-           abs((int)data->channel[REMOTE_CH_LEFT_X] - (int)REMOTE_CENTER) <= REMOTE_DEADBAND;
+static BusMotorStatus chassis_prepare_wait_status(ChassisPrepareState* state, BusMotorStatus status) {
+    if(status != MOTOR_STATUS_OK && status != MOTOR_STATUS_NO_FEEDBACK && status != MOTOR_STATUS_TIMEOUT)
+        return status;
+    return (uint32_t)(HAL_GetTick() - state->since_ms) >= CHASSIS_FEEDBACK_TIMEOUT_MS
+        ? MOTOR_STATUS_TIMEOUT : MOTOR_STATUS_BUSY;
 }
-
-static BusMotorStatus chassis_wait_feedback(BusMotorId id, BusMotorFeedback* feedback) {
-    const uint32_t start = HAL_GetTick();
-    BusMotorStatus status;
-    do {
-        if(!chassis_prepare_allowed())
-            return MOTOR_STATUS_ERROR;
-        status = chassis_receive_feedback();
-        if(status != MOTOR_STATUS_OK)
-            return status;
-        status = bus_motor.feedback.all(id, feedback);
-        if(status == MOTOR_STATUS_OK && s_feedback_seen[id - 1u] &&
-           (uint32_t)(HAL_GetTick() - s_feedback_ms[id - 1u]) < CHASSIS_FEEDBACK_TIMEOUT_MS) {
-            return feedback->error_code > 1u ? MOTOR_STATUS_ERROR : status;
-        }
-        if(status != MOTOR_STATUS_OK && status != MOTOR_STATUS_NO_FEEDBACK && status != MOTOR_STATUS_TIMEOUT)
-            return status;
-        chassis_motor_delay(1u);
-    } while((uint32_t)(HAL_GetTick() - start) < CHASSIS_FEEDBACK_TIMEOUT_MS);
-    return status == MOTOR_STATUS_OK ? MOTOR_STATUS_NO_FEEDBACK : status;
-}
-
 static BusMotorStatus chassis_prepare_steer_motor(BusMotorId id) {
+    const int index = chassis_role_index(s_steer_ids, id);
+    if(index < 0) return MOTOR_STATUS_NOT_FOUND;
+    ChassisPrepareState* state = &s_steer_prepare[index];
+    BusMotorStatus status;
+    BusMotorFeedback feedback;
+    switch(state->phase) {
+        case PREPARE_CLEAR:
+            status = dm_motor_clear_error(id);
+            if(status == MOTOR_STATUS_OK) state->phase = PREPARE_DISABLE;
+            break;
+        case PREPARE_DISABLE:
+            status = bus_motor.basic.disable(id);
+            if(status == MOTOR_STATUS_OK) state->phase = PREPARE_ACTIVATE;
+            break;
+        case PREPARE_ACTIVATE:
+            status = bus_motor.profile.activate(id, BUS_MOTOR_PROFILE_POSITION);
+            if(status == MOTOR_STATUS_OK) {
+                state->phase = PREPARE_POSITION;
+                state->since_ms = HAL_GetTick();
+            }
+            break;
+        case PREPARE_POSITION:
+            status = chassis_prepare_feedback(id, &feedback);
+            if(status == MOTOR_STATUS_OK && feedback.state == BUS_MOTOR_STATE_DISABLED &&
+               (feedback.valid & BUS_MOTOR_FEEDBACK_POSITION) != 0u) {
+                state->position = feedback.position;
+                state->phase = PREPARE_ZERO_TARGET;
+            } else return chassis_prepare_wait_status(state, status);
+            break;
+        case PREPARE_ZERO_TARGET:
+            status = dm_motor_set_pos_vel(id, state->position, 0.0f);
+            if(status == MOTOR_STATUS_OK) state->phase = PREPARE_ENABLE;
+            break;
+        case PREPARE_ENABLE:
+            status = bus_motor.basic.enable(id);
+            if(status == MOTOR_STATUS_OK) {
+                state->phase = PREPARE_ENABLED_FEEDBACK;
+                state->since_ms = HAL_GetTick();
+                state->feedback_sequence = s_feedback_sequence[index];
+            }
+            break;
+        case PREPARE_ENABLED_FEEDBACK:
+            status = chassis_prepare_feedback(id, &feedback);
+            if(status == MOTOR_STATUS_OK && feedback.state == BUS_MOTOR_STATE_ENABLED &&
+               s_feedback_sequence[index] != state->feedback_sequence) {
+                state->phase = PREPARE_DONE;
+                return MOTOR_STATUS_OK;
+            }
+            return chassis_prepare_wait_status(state, status);
+        case PREPARE_DONE: return MOTOR_STATUS_OK;
+        default: return MOTOR_STATUS_ERROR;
+    }
+    return status == MOTOR_STATUS_OK ? MOTOR_STATUS_BUSY : status;
+}
+static BusMotorStatus chassis_prepare_drive_motor(BusMotorId id) {
+    const int index = chassis_role_index(s_drive_ids, id);
+    if(index < 0) return MOTOR_STATUS_NOT_FOUND;
+    ChassisPrepareState* state = &s_drive_prepare[index];
     BusMotorFeedback feedback;
     BusMotorStatus status;
-    if(!chassis_prepare_allowed())
-        return MOTOR_STATUS_ERROR;
-    status = dm_motor_clear_error(id);
-    if(status == MOTOR_STATUS_OK)
-        status = bus_motor.basic.disable(id);
-    if(status == MOTOR_STATUS_OK)
-        status = bus_motor.profile.activate(id, BUS_MOTOR_PROFILE_POSITION);
-    if(status == MOTOR_STATUS_OK)
-        status = chassis_wait_feedback(id, &feedback);
-    if(status == MOTOR_STATUS_OK)
-        status = dm_motor_set_pos_vel(id, feedback.position, 0.0f);
-    if(status == MOTOR_STATUS_OK && !chassis_prepare_allowed())
-        status = MOTOR_STATUS_ERROR;
-    if(status == MOTOR_STATUS_OK)
-        status = bus_motor.basic.enable(id);
-    if(status == MOTOR_STATUS_OK) {
-        const uint32_t start = HAL_GetTick();
-        do {
-            chassis_motor_delay(1u);
-            if(!chassis_prepare_allowed()) {
-                status = MOTOR_STATUS_ERROR;
-                break;
-            }
-            status = bus_motor.feedback.all(id, &feedback);
-            if(status != MOTOR_STATUS_OK || feedback.error_code > 1u) {
-                if(status == MOTOR_STATUS_OK)
-                    status = MOTOR_STATUS_ERROR;
-                break;
-            }
-            if(feedback.error_code == 1u)
-                break;
-        } while((uint32_t)(HAL_GetTick() - start) < CHASSIS_FEEDBACK_TIMEOUT_MS);
-        if(status == MOTOR_STATUS_OK && feedback.error_code != 1u)
-            status = MOTOR_STATUS_TIMEOUT;
+    switch(state->phase) {
+        case PREPARE_CLEAR:
+            state->since_ms = HAL_GetTick();
+            state->phase = PREPARE_POSITION;
+            return MOTOR_STATUS_BUSY;
+        case PREPARE_POSITION:
+            status = chassis_prepare_feedback(id, &feedback);
+            if(status != MOTOR_STATUS_OK) return chassis_prepare_wait_status(state, status);
+            state->phase = PREPARE_ACTIVATE;
+            return MOTOR_STATUS_BUSY;
+        case PREPARE_ACTIVATE:
+            status = bus_motor.profile.activate(id, BUS_MOTOR_PROFILE_VELOCITY);
+            if(status == MOTOR_STATUS_OK) state->phase = PREPARE_ENABLE;
+            break;
+        case PREPARE_ENABLE:
+            status = bus_motor.basic.enable(id);
+            if(status == MOTOR_STATUS_OK) { state->phase = PREPARE_DONE; return MOTOR_STATUS_OK; }
+            break;
+        case PREPARE_DONE: return MOTOR_STATUS_OK;
+        default: return MOTOR_STATUS_ERROR;
     }
-    if(status != MOTOR_STATUS_OK)
-        log_warn("CHASSIS steer prepare failed: id=%u status=%s", id, bus_motor.status_str(status));
-    return status;
+    return status == MOTOR_STATUS_OK ? MOTOR_STATUS_BUSY : status;
 }
-
-static BusMotorStatus chassis_prepare_drive_motor(BusMotorId id) {
-    BusMotorFeedback feedback;
-    if(!chassis_prepare_allowed())
-        return MOTOR_STATUS_ERROR;
-    BusMotorStatus status = chassis_wait_feedback(id, &feedback);
-    if(status == MOTOR_STATUS_OK)
-        status = bus_motor.profile.activate(id, BUS_MOTOR_PROFILE_VELOCITY);
-    if(status == MOTOR_STATUS_OK)
-        status = bus_motor.basic.enable(id);
-    if(status != MOTOR_STATUS_OK)
-        log_warn("CHASSIS drive prepare failed: id=%u status=%s", id, bus_motor.status_str(status));
-    return status;
-}
-
 static BusMotorStatus chassis_set_steer_target(BusMotorId id, float position, float velocity) {
     return dm_motor_set_pos_vel(id, position, velocity);
 }
-
-static void chassis_steer_can_rx_callback(FDCAN_HandleTypeDef* hcan, const FDCAN_RxHeaderTypeDef* header, const uint8_t data[8], void* user) {
-    (void)hcan;
-    (void)user;
-    if(!s_registry_ready || header == NULL || header->IdType != FDCAN_STANDARD_ID ||
-       header->RxFrameType != FDCAN_DATA_FRAME || header->DataLength != FDCAN_DLC_BYTES_8)
-        return;
+static bool chassis_rx_header_valid(const FDCAN_RxHeaderTypeDef* header) {
+    return s_registry_ready && header != NULL && header->IdType == FDCAN_STANDARD_ID &&
+        header->RxFrameType == FDCAN_DATA_FRAME && header->DataLength == FDCAN_DLC_BYTES_8;
+}
+static void chassis_steer_can_rx_callback(FDCAN_HandleTypeDef* hcan, const FDCAN_RxHeaderTypeDef* header,
+                                         const uint8_t data[8], void* user) {
+    (void)hcan; (void)user;
+    if(!chassis_rx_header_valid(header) || data == NULL) return;
     if(s_steer_rx_trace.count < 16u) {
         volatile ChassisRxFrame* trace = &s_steer_rx_trace.frames[s_steer_rx_trace.count];
         trace->id = header->Identifier;
         trace->stamp_ms = HAL_GetTick();
-        for(uint8_t i = 0u; i < 8u; ++i)
-            trace->data[i] = data[i];
+        for(uint8_t i = 0u; i < 8u; ++i) trace->data[i] = data[i];
         __DMB();
         ++s_steer_rx_trace.count;
     }
-    const DmMotorConfig* config = NULL;
-    for(uint8_t i = 0u; i < CHASSIS_MODULE_COUNT; ++i) {
-        if(header->Identifier == s_steer_config[i].master_id) {
-            config = &s_steer_config[i];
-            break;
-        }
-    }
-    if(config == NULL)
-        return;
-    /* A parameter ACK starts with its full CAN ID; a feedback position byte
-       may also equal 0x33/0x55 and must not be mistaken for an ACK. */
-    const uint16_t parameter_id = (uint16_t)data[0] | ((uint16_t)data[1] << 8);
-    if(parameter_id == config->can_id && dm_motor_parse_parameter_frame(header->Identifier, data))
-        return;
-    if((data[0] & 0x0Fu) != (config->can_id & 0x0Fu)) {
-        ++s_steer_rx_mismatch_count;
-        return;
-    }
     chassis_queue_push(&s_steer_rx, header->Identifier, data);
 }
-
-static void chassis_drive_can_rx_callback(FDCAN_HandleTypeDef* hcan, const FDCAN_RxHeaderTypeDef* header, const uint8_t data[8], void* user) {
-    (void)hcan;
-    (void)user;
-    if(!s_registry_ready || header == NULL || header->IdType != FDCAN_STANDARD_ID ||
-       header->RxFrameType != FDCAN_DATA_FRAME || header->DataLength != FDCAN_DLC_BYTES_8 ||
-       header->Identifier < 0x201u || header->Identifier > 0x204u)
-        return;
-    chassis_queue_push(&s_drive_rx, header->Identifier, data);
+static void chassis_drive_can_rx_callback(FDCAN_HandleTypeDef* hcan, const FDCAN_RxHeaderTypeDef* header,
+                                         const uint8_t data[8], void* user) {
+    (void)hcan; (void)user;
+    if(chassis_rx_header_valid(header) && data != NULL)
+        chassis_queue_push(&s_drive_rx, header->Identifier, data);
 }
-
+static void chassis_reset_prepare(void) {
+    memset(s_steer_prepare, 0, sizeof(s_steer_prepare));
+    memset(s_drive_prepare, 0, sizeof(s_drive_prepare));
+}
 static void chassis_reset_transport(void) {
     const uint32_t irq_state = can_critical_enter();
     s_steer_rx.read = s_steer_rx.write;
     s_drive_rx.read = s_drive_rx.write;
-    s_steer_rx.overflow = false;
-    s_drive_rx.overflow = false;
+    s_steer_rx.overflow = s_drive_rx.overflow = false;
+    can_critical_exit(irq_state);
     s_receive_error = MOTOR_STATUS_OK;
     memset(s_feedback_seen, 0, sizeof(s_feedback_seen));
-    can_critical_exit(irq_state);
+    chassis_reset_prepare();
 }
 
 void assemble_chassis_log_diagnostics(void) {
@@ -444,10 +453,11 @@ void assemble_chassis_log_diagnostics(void) {
              (unsigned long)drive.tx_error_count, (unsigned long)drive.rx_error_count, drive.bus_off ? 1u : 0u);
 }
 
+
 static BusMotorStatus chassis_cancel_pending_commands(void) {
+    chassis_reset_prepare();
     const BspCanStatus steer = can_cancel_tx(&hfdcan1);
     const BspCanStatus drive = can_cancel_tx(&hfdcan2);
-    return steer == STM32_HAL_CAN_OK && drive == STM32_HAL_CAN_OK
-               ? MOTOR_STATUS_OK
-               : MOTOR_STATUS_PORT_ERROR;
+    const BusMotorStatus first = chassis_can_status(steer);
+    return first != MOTOR_STATUS_OK ? first : chassis_can_status(drive);
 }

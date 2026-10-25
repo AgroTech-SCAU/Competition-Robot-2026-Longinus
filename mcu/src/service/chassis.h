@@ -35,19 +35,19 @@
     X(NOT_INITIALIZED, "Chassis Not Initialized")
 
 /**
- * @brief 四个舵轮模块的固定顺序和业务逻辑电机 ID
+ * @brief 四个舵轮模块的固定顺序；业务逻辑电机 ID 由 ChassisConfig 注入
  *
- * 顺序约定为(name, index, steer_id, drive_id)：
+ * 顺序约定为(name, index)
  * - FL: Front Left
  * - FR: Front Right
  * - RR: Rear Right
  * - RL: Rear Left
  */
 #define CHASSIS_MODULE_TABLE \
-    X(FL, 0, 1, 5)           \
-    X(FR, 1, 2, 6)           \
-    X(RR, 2, 3, 7)           \
-    X(RL, 3, 4, 8)
+    X(FL, 0)           \
+    X(FR, 1)           \
+    X(RR, 2)           \
+    X(RL, 3)
 
 /**
  * @brief 底盘服务错误码
@@ -71,7 +71,7 @@ typedef enum {
 /**
  * @brief 底盘舵轮模块枚举
  */
-#define X(name, index, steer_id, drive_id) CHASSIS_MODULE_##name = (index),
+#define X(name, index) CHASSIS_MODULE_##name = (index),
 typedef enum {
     CHASSIS_MODULE_TABLE
         CHASSIS_MODULE_COUNT = 4
@@ -93,6 +93,7 @@ typedef struct {
  * @param steer_target_mode 转向电机目标角生成模式
  */
 typedef struct {
+    /* Preparation advances bounded steps; BUSY asks the caller to poll next tick */
     BusMotorStatus (*prepare_steer_motor)(BusMotorId id);
     BusMotorStatus (*prepare_drive_motor)(BusMotorId id);
     BusMotorStatus (*set_steer_target)(BusMotorId id, float position, float velocity);
@@ -102,6 +103,8 @@ typedef struct {
     BusMotorStatus (*disable_drive_motors)(void);
     void (*clear_motor_fault)(void);
     BusMotorGroupId drive_group;
+    BusMotorId steer_ids[CHASSIS_MODULE_COUNT];
+    BusMotorId drive_ids[CHASSIS_MODULE_COUNT];
     int8_t drive_sign[CHASSIS_MODULE_COUNT];
     bool (*feedback_is_valid)(void);
     SteerWheelModel model;
@@ -186,7 +189,7 @@ extern const struct ChassisInterface {
     /**
      * @brief 判断底盘是否已经就绪
      *
-     * 该状态只表示转向电机反馈已经正常；
+     * 该状态只表示转向电机反馈已经正常
      * 上层若要整机可遥控，还需要同时检查遥控链路
      *
      * @return true 底盘转向反馈已就绪
@@ -266,7 +269,7 @@ ChassisErrorCode chassis_clear_motor_fault(void);
 /** @brief 处理反馈和驱动超时，不生成运动命令 */
 ChassisErrorCode chassis_poll(void);
 
-/** @brief Only drain feedback; never sends motor commands or retries zero output. */
+/** @brief Only drain feedback; never sends motor commands or retries zero output */
 ChassisErrorCode chassis_poll_feedback(void);
 
 /**
@@ -278,7 +281,7 @@ ChassisErrorCode chassis_brake(void);
 /**
  * @brief 判断底盘是否已经就绪
  *
- * 该函数用于 RGB 指示和上层状态判断；
+ * 该函数用于 RGB 指示和上层状态判断
  * 不会触发新的控制动作
  *
  * @return true 底盘转向反馈已就绪

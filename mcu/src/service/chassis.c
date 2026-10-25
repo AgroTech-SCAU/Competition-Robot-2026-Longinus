@@ -11,7 +11,7 @@
 /**
  * @brief 底盘接口单例的文件内短别名
  *
- * 仅用于本文件内部减少重复书写；
+ * 仅用于本文件内部减少重复书写
  * 对外仍通过 chassis_interface 暴露接口
  */
 #define ch chassis_interface
@@ -19,98 +19,98 @@
 /**
  * @brief 默认轮角速度到驱动电机角速度的传动比
  *
- * 当前机械结构按一比一处理；
+ * 当前机械结构按一比一处理
  * 若后续更换传动结构，可通过配置覆盖
  */
 #define CHASSIS_DEFAULT_WHEEL_DRIVE_RATIO 1.0f
 /**
  * @brief 转向电机 S 曲线规划后的最大跟踪速度
  *
- * 单位为 rad/s；
+ * 单位为 rad/s
  * 该值越大转向越快，但也更容易引入抖动
  */
 #define CHASSIS_STEER_TRACK_MAX_SPEED_RAD_S 12.56f
 /**
  * @brief 转向电机 S 曲线规划使用的最低跟踪速度
  *
- * 单位为 rad/s；
+ * 单位为 rad/s
  * 用于避免速度过低导致转向响应迟滞
  */
 #define CHASSIS_STEER_TRACK_MIN_SPEED_RAD_S 1.57f
 /**
  * @brief 转向跟踪速度从最低值爬升到最高值的时间
  *
- * 单位为秒；
+ * 单位为秒
  * 该时间决定 S 曲线加速段的柔和程度
  */
 #define CHASSIS_STEER_SPEED_RAMP_TIME_S 0.1f
 /**
  * @brief 转向接近目标角时开始降速的角度窗口
  *
- * 单位为 rad；
+ * 单位为 rad
  * 误差进入该窗口后速度会平滑降低
  */
 #define CHASSIS_STEER_SLOWDOWN_ANGLE_RAD 0.628f
 /**
  * @brief 底盘控制任务周期
  *
- * 单位为秒；
+ * 单位为秒
  * 需与 TIM6 触发周期保持一致
  */
 #define CHASSIS_CONTROL_PERIOD_S 0.002f
 /**
  * @brief 判定转向目标明显变化的角度阈值
  *
- * 单位为 rad；
+ * 单位为 rad
  * 超过该阈值会启动 S 曲线速度规划
  */
 #define CHASSIS_STEER_TARGET_CHANGE_RAD 0.0628f
 /**
  * @brief 允许驱动电机出力的转向角误差阈值
  *
- * 单位为 rad；
+ * 单位为 rad
  * 未进入该误差范围前，驱动速度会被置零以防漂移
  */
 #define CHASSIS_DRIVE_ANGLE_TOL_RAD 0.157f
 /**
  * @brief 驻车刹车流程使用的转向到位误差阈值
  *
- * 单位为 rad；
+ * 单位为 rad
  * 转向角到位后才会进入电机抱死状态
  */
 #define CHASSIS_BRAKE_ANGLE_TOL_RAD 0.0628f
 /**
  * @brief 圆周率常量
  *
- * 用于角度归一化和等效角计算；
+ * 用于角度归一化和等效角计算
  * 保持 float 精度即可满足底盘控制需求
  */
 #define CHASSIS_PI 3.14159265358979323846f
 /**
  * @brief 转向角完整周期
  *
- * 单位为 rad；
+ * 单位为 rad
  * 用于选择离当前位置最近的等效转向角
  */
 #define CHASSIS_2PI (2.0f * CHASSIS_PI)
 /**
  * @brief 转向电机位置命令的安全绝对边界
  *
- * 单位为 rad；
+ * 单位为 rad
  * 目标角会被限制在该范围内
  */
 #define CHASSIS_STEER_POS_LIMIT_RAD 12.4f
 /**
  * @brief 等效转向角切换滞回
  *
- * 单位为 rad；
+ * 单位为 rad
  * 用于避免目标角在两个等效解之间来回跳变
  */
 #define CHASSIS_EQUIV_ANGLE_HYST_RAD 0.12f
 /**
  * @brief 驱动方向等效优化的滞回角
  *
- * 单位为 rad；
+ * 单位为 rad
  * 用于避免前进/后退等效解在临界角附近抖动
  */
 #define CHASSIS_DRIVE_EQUIV_HYST_RAD 0.03f
@@ -118,7 +118,7 @@
 /**
  * @brief 逻辑舵轮模块到业务电机 ID 的映射关系
  *
- * 每个模块包含一个转向电机和一个驱动电机；
+ * 每个模块包含一个转向电机和一个驱动电机
  *
  * @param module 舵轮模块枚举
  * @param steer_id 转向电机业务 ID
@@ -126,14 +126,14 @@
  */
 typedef struct {
     ChassisModule module;
-    uint8_t steer_id;
-    uint8_t drive_id;
+    BusMotorId steer_id;
+    BusMotorId drive_id;
 } ChassisModuleMap;
 
 /**
  * @brief 单个舵轮模块最终下发的硬件命令
  *
- * steer_target_abs_angle 为转向电机位置模式绝对目标角；
+ * steer_target_abs_angle 为转向电机位置模式绝对目标角
  * wheel_omega 为已经完成等效优化后的最终车轮角速度
  */
 typedef struct {
@@ -145,7 +145,7 @@ typedef struct {
 /**
  * @brief 单个舵轮模块的硬件反馈缓存
  *
- * steer_abs_angle 为转向电机位置反馈绝对角；
+ * steer_abs_angle 为转向电机位置反馈绝对角
  * drive_omega 为修正安装方向后的驱动电机角速度
  */
 typedef struct {
@@ -156,57 +156,60 @@ typedef struct {
 /**
  * @brief 底盘服务内部可变运行实例
  *
- * 控制流程只修改该实例；
+ * 控制流程只修改该实例
  * 对外读取使用同步后的只读快照
  */
 static Chassis s_chassis = { 0 };
 static bool s_output_enabled = false;
+static bool s_preparing = false;
+static uint8_t s_prepare_steer_index;
+static uint8_t s_prepare_drive_index;
 /**
  * @brief 对外暴露的底盘只读快照
  *
- * 快照中的坐标和状态用于上层查询；
+ * 快照中的坐标和状态用于上层查询
  * 避免直接暴露内部控制过程中的中间状态
  */
 static Chassis s_chassis_view = { 0 };
 /**
  * @brief 每个舵轮的 S 曲线加速累计时间
  *
- * 单位为秒；
+ * 单位为秒
  * 目标角明显变化时会重新计时
  */
 static float s_steer_speed_ramp_time[CHASSIS_MODULE_COUNT] = { 0.0f };
 /**
  * @brief 每个舵轮上一次用于速度规划的目标转向角
  *
- * 单位为 rad；
+ * 单位为 rad
  * 用于判断是否需要重启 S 曲线
  */
 static float s_steer_speed_last_target[CHASSIS_MODULE_COUNT] = { 0.0f };
 /**
  * @brief 每个舵轮速度规划状态的初始化标志
  *
- * 首次进入控制时需要记录当前目标；
+ * 首次进入控制时需要记录当前目标
  * 后续才可根据目标变化计算 S 曲线
  */
 static bool s_steer_speed_initialized[CHASSIS_MODULE_COUNT] = { false };
 /**
  * @brief 每个舵轮模块最终下发的硬件命令缓存
  *
- * 该缓存保存转向电机绝对位置目标和最终驱动方向；
+ * 该缓存保存转向电机绝对位置目标和最终驱动方向
  * 与运动学输出解耦，避免覆盖理论舵向角
  */
 static ChassisModuleCommand s_module_cmd[CHASSIS_MODULE_COUNT] = { 0 };
 /**
  * @brief 每个舵轮模块的硬件反馈缓存
  *
- * 该缓存保存电机层绝对位置反馈；
+ * 该缓存保存电机层绝对位置反馈
  * 运动学状态只保存归一化后的舵向角
  */
 static ChassisModuleFeedback s_module_fb[CHASSIS_MODULE_COUNT] = { 0 };
 /**
  * @brief 每个舵轮上一次选择的驱动反向状态
  *
- * 用于在等效解切换时引入滞回；
+ * 用于在等效解切换时引入滞回
  * 避免目标角接近临界值时来回翻转
  */
 static bool s_last_drive_inverted[CHASSIS_MODULE_COUNT] = { false };
@@ -214,39 +217,24 @@ static uint8_t s_last_steer_missing_mask = 0xFFu;
 /**
  * @brief 上一次记录的驱动反馈缺失掩码
  *
- * 每一位对应一个舵轮模块；
+ * 每一位对应一个舵轮模块
  * 仅当掩码变化时才打印日志以避免刷屏
  */
 static uint8_t s_last_drive_missing_mask = 0xFFu;
-/**
- * @brief 展开舵轮模块表生成物理电机映射项
- *
- * 该宏只在 s_module_map 初始化时使用；
- * 展开后立即取消定义
- */
-#define X(name, index, steer_id, drive_id) [CHASSIS_MODULE_##name] = { CHASSIS_MODULE_##name, (steer_id), (drive_id) },
-/**
- * @brief 四个舵轮模块的固定电机映射表
- *
- * 表内顺序与 ChassisModule 枚举保持一致；
- * 控制循环按该表访问转向和驱动电机
- */
-static const ChassisModuleMap s_module_map[CHASSIS_MODULE_COUNT] = {
-    CHASSIS_MODULE_TABLE
-};
-#undef X
+/* Logical IDs belong to project configuration, never to this service */
+static ChassisModuleMap s_module_map[CHASSIS_MODULE_COUNT];
 
 /**
  * @brief 展开底盘状态表到接口结构体常量
  *
- * 该宏用于生成 chassis.OK 等便捷状态码字段；
+ * 该宏用于生成 chassis.OK 等便捷状态码字段
  * 展开后立即取消定义
  */
 #define X(name, str) .name = CHASSIS_##name,
 /**
  * @brief 底盘服务对外接口单例
  *
- * 上层通过 chassis.xxx 调用这些函数；
+ * 上层通过 chassis.xxx 调用这些函数
  * 实际实现均位于本文件中
  */
 const struct ChassisInterface chassis_interface = {
@@ -275,7 +263,7 @@ static BusMotorStatus chassis_steer_hold(BusMotorId id);
 /**
  * @brief 将车轮角速度转换为驱动电机角速度
  *
- * 转换会应用当前底盘配置中的传动比；
+ * 转换会应用当前底盘配置中的传动比
  * 单位均为 rad/s
  *
  * @param wheel_omega 车轮角速度
@@ -286,7 +274,7 @@ static float chassis_wheel_omega_to_drive_omega(float wheel_omega);
 /**
  * @brief 将驱动电机角速度转换为车轮角速度
  *
- * 转换会应用当前底盘配置中的传动比；
+ * 转换会应用当前底盘配置中的传动比
  * 单位均为 rad/s
  *
  * @param drive_omega 驱动电机角速度
@@ -297,7 +285,7 @@ static float chassis_drive_omega_to_wheel_omega(float drive_omega);
 /**
  * @brief 检查底盘初始化配置是否合法
  *
- * 函数会检查抽象电机实例、端口操作表、启动回调、几何尺寸和传动比；
+ * 函数会检查抽象电机实例、端口操作表、启动回调、几何尺寸和传动比
  * 任何无效参数都会阻止底盘初始化
  *
  * @param config 待检查的底盘配置指针
@@ -308,7 +296,7 @@ static ChassisErrorCode chassis_check_config(const ChassisConfig* config);
 /**
  * @brief 向所有转向电机发送上电准备序列
  *
- * 具体序列由 assemble 层注册的回调决定；
+ * 具体序列由 assemble 层注册的回调决定
  * 单个电机失败不会阻止后续电机继续尝试
  *
  * @return ChassisErrorCode 所有电机是否都接受了命令
@@ -319,7 +307,7 @@ static ChassisErrorCode chassis_prepare_drive_motors(void);
 /**
  * @brief 将外部底盘速度命令转换到内部坐标系
  *
- * 遥控和上层接口使用外部约定坐标系；
+ * 遥控和上层接口使用外部约定坐标系
  * 运动学求解前需要转换为内部坐标系
  *
  * @param vx_ext 外部坐标系 x 方向线速度
@@ -334,7 +322,7 @@ static void chassis_external_to_internal_twist(float vx_ext, float vy_ext, float
 /**
  * @brief 将内部底盘速度反馈转换到外部坐标系
  *
- * 运动学状态在内部坐标系中维护；
+ * 运动学状态在内部坐标系中维护
  * 对外展示前需要转换为用户约定坐标系
  *
  * @param vx_int 内部坐标系 x 方向线速度
@@ -349,7 +337,7 @@ static void chassis_internal_to_external_twist(float vx_int, float vy_int, float
 /**
  * @brief 计算外部速度命令引起的理论偏航角误差补偿
  *
- * 该函数实现了一个简单的线性偏航补偿模型；
+ * 该函数实现了一个简单的线性偏航补偿模型
  * 通过调整目标角速度来抵消由于线速度引起的转向偏差
  *
  * @param vx_ext 外部坐标系 x 方向线速度
@@ -361,7 +349,7 @@ static float chassis_calc_yaw_bias_ext(float vx_ext, float vy_ext);
 /**
  * @brief 将底盘内部状态同步到对外快照
  *
- * 该函数会将内部控制过程中维护的状态转换并复制到只读快照；
+ * 该函数会将内部控制过程中维护的状态转换并复制到只读快照
  * 上层查询接口会直接返回该快照中的数据
  */
 static void chassis_sync_view(void);
@@ -369,7 +357,7 @@ static void chassis_sync_view(void);
 /**
  * @brief 将角度归一化到 (-pi, pi] 区间
  *
- * 单位为 rad；
+ * 单位为 rad
  * 该函数用于计算最短角度误差
  *
  * @param angle 输入角度
@@ -380,7 +368,7 @@ static float chassis_wrap_pi(float angle);
 /**
  * @brief 计算归一化输入的 smoothstep 曲线值
  *
- * 输入会被限制到 [0, 1]；
+ * 输入会被限制到 [0, 1]
  * 输出用于生成转向速度 S 曲线
  *
  * @param x 归一化输入值
@@ -391,8 +379,8 @@ static float chassis_smoothstep(float x);
 /**
  * @brief 按当前模式生成同舵向的转向电机绝对目标角
  *
- * 输入 target_angle 表示理论舵向角；
- * ABS_NEAREST 模式选择离当前转向位置最近的等效绝对角，
+ * 输入 target_angle 表示理论舵向角
+ * ABS_NEAREST 模式选择离当前转向位置最近的等效绝对角
  * WRAP_PI 模式直接将最终目标限制到 (-pi, pi]
  *
  * @param current_angle 当前转向电机绝对位置角，单位 rad
@@ -404,7 +392,7 @@ static float chassis_select_nearest_heading_angle(float current_angle, float tar
 /**
  * @brief 解析单个舵轮模块驻车刹车目标
  *
- * 驻车刹车只关心轮子滚动轴线；
+ * 驻车刹车只关心轮子滚动轴线
  * target_angle 与 target_angle + pi 均视为等效目标
  *
  * @param module 需要解析的舵轮模块
@@ -415,7 +403,7 @@ static void chassis_resolve_brake_module_command(ChassisModule module, float tar
 /**
  * @brief 解析单个舵轮模块最终硬件命令
  *
- * 函数根据理论舵向角和当前位置选择最近的电机绝对目标角；
+ * 函数根据理论舵向角和当前位置选择最近的电机绝对目标角
  * 必要时会切换到等效反向驱动解并翻转车轮角速度
  *
  * @param module 需要解析的舵轮模块
@@ -425,7 +413,7 @@ static void chassis_resolve_drive_module_command(ChassisModule module);
 /**
  * @brief 重置所有转向速度 S 曲线规划状态
  *
- * 停止、刹车或目标明显变化时调用；
+ * 停止、刹车或目标明显变化时调用
  * 下次控制周期会重新建立速度规划起点
  */
 static void chassis_reset_steer_speed_profiles(void);
@@ -433,7 +421,7 @@ static void chassis_reset_steer_speed_profiles(void);
 /**
  * @brief 计算单个舵轮当前转向跟踪速度
  *
- * 速度同时受启动加速曲线和接近目标降速曲线影响；
+ * 速度同时受启动加速曲线和接近目标降速曲线影响
  * 输出会限制在最小和最大跟踪速度之间
  *
  * @param module 舵轮模块
@@ -445,7 +433,7 @@ static float chassis_calc_steer_track_speed(ChassisModule module, float target_a
 /**
  * @brief 维护转向和驱动反馈就绪状态
  *
- * 函数负责维护 ready 状态；
+ * 函数负责维护 ready 状态
  * 未就绪时会要求底盘保持驱动输出为零
  *
  * @param steer_feedback_ready 四个转向电机是否均有有效反馈
@@ -462,7 +450,7 @@ static bool chassis_maintain_motor_startup(
 /**
  * @brief 检查转向目标是否已接近到允许驱动输出
  *
- * 该函数实现“先转向再驱动”的门控；
+ * 该函数实现“先转向再驱动”的门控
  * 未到位时轮速命令不会下发给驱动电机
  *
  * @return true 所有舵轮均在允许误差内
@@ -473,7 +461,7 @@ static bool chassis_drive_targets_reached(void);
 /**
  * @brief 设置驻车刹车流程使用的固定转向目标
  *
- * 驻车时四个舵轮会转到预设角度；
+ * 驻车时四个舵轮会转到预设角度
  * 到位后再抱死转向电机
  */
 static void chassis_set_brake_targets(void);
@@ -481,7 +469,7 @@ static void chassis_set_brake_targets(void);
 /**
  * @brief 检查驻车刹车转向目标是否已到位
  *
- * 函数根据当前转向角和刹车误差阈值判断；
+ * 函数根据当前转向角和刹车误差阈值判断
  * 到位后刹车流程可以进入抱死状态
  *
  * @return true 驻车转向目标已到位
@@ -512,12 +500,15 @@ ChassisErrorCode chassis_init(const ChassisConfig* config) {
     s_chassis.steer_then_drive_enabled = true;
     s_chassis.initialized = false;
     s_output_enabled = false;
+    s_preparing = false;
+    s_prepare_steer_index = s_prepare_drive_index = 0u;
     chassis_reset_steer_speed_profiles();
     s_last_steer_missing_mask = 0xFFu;
     s_last_drive_missing_mask = 0xFFu;
     s_chassis.steer_motor_ready = false;
     s_chassis.drive_motor_ready = false;
     for(uint8_t i = 0u; i < CHASSIS_MODULE_COUNT; ++i) {
+        s_module_map[i] = (ChassisModuleMap){ (ChassisModule)i, config->steer_ids[i], config->drive_ids[i] };
         s_module_cmd[i].steer_target_abs_angle = 0.0f;
         s_module_cmd[i].wheel_omega = 0.0f;
         s_module_cmd[i].drive_inverted = false;
@@ -554,6 +545,10 @@ ChassisErrorCode chassis_set_velocity(float vx, float vy, float wz) {
         return ch.NOT_INITIALIZED;
     }
 
+    if(!isfinite(vx) || !isfinite(vy) || !isfinite(wz) ||
+       (s_preparing && (vx != 0.0f || vy != 0.0f || wz != 0.0f))) {
+        return ch.INVALID_PARAM;
+    }
     s_chassis.brake_requested = false;
     s_chassis.brake_latched = false;
     wz_for_ik = wz - chassis_calc_yaw_bias_ext(vx, vy);
@@ -598,6 +593,9 @@ ChassisErrorCode chassis_process(void) {
     if(!s_output_enabled) {
         return chassis_stop();
     }
+    /* Waiting for preparation ACKs must not submit any movement targets */
+    if(s_preparing)
+        return chassis_motor_status(s_chassis.config.motor_poll_feedback(), "startup feedback");
 
     if(s_chassis.config.motor_update() != MOTOR_STATUS_OK) {
         (void)chassis_stop();
@@ -608,7 +606,8 @@ ChassisErrorCode chassis_process(void) {
         BusMotorStatus status = bus_motor.feedback.all(map->steer_id, &steer_feedback[i]);
         if(status != MOTOR_STATUS_OK ||
            (steer_feedback[i].valid & BUS_MOTOR_FEEDBACK_POSITION) == 0u ||
-           steer_feedback[i].error_code > 1u || !isfinite(steer_feedback[i].position)) {
+           (steer_feedback[i].valid & BUS_MOTOR_FEEDBACK_STATE) == 0u ||
+           steer_feedback[i].state != BUS_MOTOR_STATE_ENABLED || !isfinite(steer_feedback[i].position)) {
             steer_feedback_observed = false;
             steer_missing_mask |= (uint8_t)(1u << map->module);
             if(status != MOTOR_STATUS_OK) (void)chassis_motor_status(status, "steer feedback");
@@ -616,7 +615,8 @@ ChassisErrorCode chassis_process(void) {
         status = bus_motor.feedback.all(map->drive_id, &drive_feedback[i]);
         if(status != MOTOR_STATUS_OK ||
            (drive_feedback[i].valid & BUS_MOTOR_FEEDBACK_VELOCITY) == 0u ||
-           !isfinite(drive_feedback[i].velocity)) {
+           (drive_feedback[i].valid & BUS_MOTOR_FEEDBACK_STATE) == 0u ||
+           drive_feedback[i].state != BUS_MOTOR_STATE_ENABLED || !isfinite(drive_feedback[i].velocity)) {
             drive_feedback_observed = false;
             drive_missing_mask |= (uint8_t)(1u << map->module);
             if(status != MOTOR_STATUS_OK) (void)chassis_motor_status(status, "drive feedback");
@@ -742,6 +742,13 @@ ChassisErrorCode chassis_stop(void) {
         return ch.NOT_INITIALIZED;
     }
 
+    if(s_preparing) {
+        s_preparing = false;
+        s_output_enabled = false;
+        s_prepare_steer_index = s_prepare_drive_index = 0u;
+        if(chassis_motor_status(s_chassis.config.cancel_pending_commands(), "cancel preparation") != ch.OK)
+            result = ch.MOTOR_COMMAND_FAILED;
+    }
     s_chassis.kine.control.vx = 0.0f;
     s_chassis.kine.control.vy = 0.0f;
     s_chassis.kine.control.wz = 0.0f;
@@ -750,7 +757,7 @@ ChassisErrorCode chassis_stop(void) {
     chassis_reset_steer_speed_profiles();
 
     /* RX faults remain latched for runtime to report/clear. They must not make
-     * a successfully transmitted safe stop permanently unrecoverable. */
+     * a successfully transmitted safe stop permanently unrecoverable */
     (void)s_chassis.config.motor_poll_feedback();
     const float zero[CHASSIS_MODULE_COUNT] = { 0 };
     if(s_output_enabled && s_chassis.config.feedback_is_valid()) {
@@ -783,34 +790,50 @@ ChassisErrorCode chassis_stop(void) {
 }
 
 ChassisErrorCode chassis_set_output_enabled(bool enabled) {
-    if(!s_chassis.initialized) {
-        return ch.NOT_INITIALIZED;
-    }
+    if(!s_chassis.initialized) return ch.NOT_INITIALIZED;
     if(!enabled) {
-        /* Remove queued motion before attempting safe frames. Cancellation is asynchronous. */
+        /* Cancel wire transactions before sending the first safe frame */
         s_output_enabled = false;
+        s_preparing = false;
+        s_prepare_steer_index = s_prepare_drive_index = 0u;
+        s_chassis.steer_motor_ready = false;
+        s_chassis.drive_motor_ready = false;
         ChassisErrorCode cancelled = chassis_motor_status(s_chassis.config.cancel_pending_commands(), "cancel pending commands");
         ChassisErrorCode stopped = chassis_stop();
         return cancelled != ch.OK ? cancelled : stopped;
     }
+    /* Drain arrival-ordered RX before beginning or advancing any transaction
+     * An ACK queued before a new request must never become its confirmation */
+    if(!s_output_enabled || s_preparing) {
+        ChassisErrorCode received = chassis_motor_status(s_chassis.config.motor_poll_feedback(), "prepare feedback");
+        if(received != ch.OK) {
+            (void)chassis_set_output_enabled(false);
+            return received;
+        }
+    }
     if(!s_output_enabled) {
         ChassisErrorCode status = chassis_stop();
-        if(status == ch.OK) {
-            status = chassis_prepare_steer_motors();
-        }
-        if(status == ch.OK) {
-            status = chassis_prepare_drive_motors();
-        }
-        if(status != ch.OK) {
-            s_output_enabled = false;
-            (void)chassis_motor_status(s_chassis.config.cancel_pending_commands(), "cancel pending commands");
-            (void)chassis_stop();
-            return status;
-        }
+        if(status != ch.OK) return status;
+        s_output_enabled = true;
+        s_preparing = true;
+        s_prepare_steer_index = s_prepare_drive_index = 0u;
         s_chassis.steer_motor_ready = false;
         s_chassis.drive_motor_ready = false;
     }
-    s_output_enabled = enabled;
+    if(s_preparing) {
+        ChassisErrorCode status = chassis_prepare_steer_motors();
+        if(status == ch.OK && s_prepare_steer_index == CHASSIS_MODULE_COUNT)
+            status = chassis_prepare_drive_motors();
+        if(status != ch.OK) {
+            s_output_enabled = false;
+            s_preparing = false;
+            s_prepare_steer_index = s_prepare_drive_index = 0u;
+            (void)chassis_motor_status(s_chassis.config.cancel_pending_commands(), "cancel failed preparation");
+            (void)chassis_stop();
+            return status;
+        }
+        if(s_prepare_drive_index == CHASSIS_MODULE_COUNT) s_preparing = false;
+    }
     return ch.OK;
 }
 
@@ -862,13 +885,13 @@ const SteerWheelControl* chassis_get_control(void) {
 /**
  * @brief 检查底盘是否已经就绪
  *
- * 当前只检查转向电机反馈状态；
+ * 检查准备阶段完成、转向和驱动反馈、控制模式及统一运行状态
  * 遥控链路是否在线由上层额外判断
  *
  * @return bool `true` 表示底盘就绪，`false` 表示仍在等待反馈
  */
 bool chassis_is_ready(void) {
-    return s_chassis.initialized && s_chassis.steer_motor_ready && s_chassis.drive_motor_ready &&
+    return s_chassis.initialized && !s_preparing && s_chassis.steer_motor_ready && s_chassis.drive_motor_ready &&
            s_chassis.config.feedback_is_valid();
 }
 
@@ -880,7 +903,7 @@ bool chassis_is_ready(void) {
 /**
  * @brief 展开底盘状态表为 switch 分支
  *
- * 该宏只在状态码转字符串函数中使用；
+ * 该宏只在状态码转字符串函数中使用
  * 展开完成后立即取消定义
  */
 #define X(name, str)     \
@@ -911,8 +934,15 @@ static ChassisErrorCode chassis_check_config(const ChassisConfig* config) {
         if(config->drive_sign[i] != 1 && config->drive_sign[i] != -1) {
             return ch.INVALID_PARAM;
         }
-        if(bus_motor.profile.require(s_module_map[i].steer_id, BUS_MOTOR_PROFILE_POSITION) != MOTOR_STATUS_OK ||
-           bus_motor.profile.require(s_module_map[i].drive_id, BUS_MOTOR_PROFILE_VELOCITY) != MOTOR_STATUS_OK) {
+        /* Zero is a valid logical ID; duplicate roles are not */
+        if(config->steer_ids[i] == config->drive_ids[i]) return ch.INVALID_PARAM;
+        for(uint8_t j = 0u; j < i; ++j) {
+            if(config->steer_ids[i] == config->steer_ids[j] || config->steer_ids[i] == config->drive_ids[j] ||
+               config->drive_ids[i] == config->steer_ids[j] || config->drive_ids[i] == config->drive_ids[j])
+                return ch.INVALID_PARAM;
+        }
+        if(bus_motor.profile.require(config->steer_ids[i], BUS_MOTOR_PROFILE_POSITION) != MOTOR_STATUS_OK ||
+           bus_motor.profile.require(config->drive_ids[i], BUS_MOTOR_PROFILE_VELOCITY) != MOTOR_STATUS_OK) {
             return ch.DEPENDENCY_MISSING;
         }
     }
@@ -927,36 +957,32 @@ static ChassisErrorCode chassis_check_config(const ChassisConfig* config) {
 }
 
 static ChassisErrorCode chassis_prepare_steer_motors(void) {
-    uint8_t i;
-
-    for(i = 0u; i < CHASSIS_MODULE_COUNT; ++i) {
-        uint8_t steer_id = s_module_map[i].steer_id;
-
-        if(s_chassis.config.prepare_steer_motor(steer_id) != MOTOR_STATUS_OK) {
-            log_warn("CHASSIS steer_id=%u prepare failed", steer_id);
+    while(s_prepare_steer_index < CHASSIS_MODULE_COUNT) {
+        BusMotorId id = s_module_map[s_prepare_steer_index].steer_id;
+        BusMotorStatus status = s_chassis.config.prepare_steer_motor(id);
+        if(status == MOTOR_STATUS_BUSY) return ch.OK;
+        if(status != MOTOR_STATUS_OK) {
+            log_warn("CHASSIS steer_id=%u prepare failed: %s", id, bus_motor.status_str(status));
             return ch.STEER_PREPARE_FAILED;
         }
-
-        log_info("CHASSIS steer_id=%u prepare ok", steer_id);
+        ++s_prepare_steer_index;
+        log_info("CHASSIS steer_id=%u prepare ok", id);
     }
-
     return ch.OK;
 }
 
 static ChassisErrorCode chassis_prepare_drive_motors(void) {
-    uint8_t i;
-
-    for(i = 0u; i < CHASSIS_MODULE_COUNT; ++i) {
-        uint8_t drive_id = s_module_map[i].drive_id;
-
-        if(s_chassis.config.prepare_drive_motor(drive_id) != MOTOR_STATUS_OK) {
-            log_warn("CHASSIS drive_id=%u prepare failed", drive_id);
+    while(s_prepare_drive_index < CHASSIS_MODULE_COUNT) {
+        BusMotorId id = s_module_map[s_prepare_drive_index].drive_id;
+        BusMotorStatus status = s_chassis.config.prepare_drive_motor(id);
+        if(status == MOTOR_STATUS_BUSY) return ch.OK;
+        if(status != MOTOR_STATUS_OK) {
+            log_warn("CHASSIS drive_id=%u prepare failed: %s", id, bus_motor.status_str(status));
             return ch.DRIVE_PREPARE_FAILED;
         }
-
-        log_info("CHASSIS drive_id=%u prepare ok", drive_id);
+        ++s_prepare_drive_index;
+        log_info("CHASSIS drive_id=%u prepare ok", id);
     }
-
     return ch.OK;
 }
 
@@ -1332,7 +1358,8 @@ static BusMotorStatus chassis_steer_hold(BusMotorId id) {
     BusMotorStatus status = bus_motor.feedback.all(id, &feedback);
 
     if(status != MOTOR_STATUS_OK || (feedback.valid & BUS_MOTOR_FEEDBACK_POSITION) == 0u ||
-       feedback.error_code > 1u) {
+       (feedback.valid & BUS_MOTOR_FEEDBACK_STATE) == 0u ||
+       feedback.state != BUS_MOTOR_STATE_ENABLED) {
         BusMotorStatus disabled = bus_motor.basic.disable(id);
         return disabled != MOTOR_STATUS_OK ? disabled
              : status != MOTOR_STATUS_OK ? status : MOTOR_STATUS_ERROR;

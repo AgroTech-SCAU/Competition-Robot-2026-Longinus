@@ -94,13 +94,26 @@ void app_runtime_process(void) {
         return;
     }
 
-    /* Check IMU/fusion readiness before any motor preparation can enable output. */
+    /* Check IMU/fusion readiness before any motor preparation can enable output */
     if(!odom.is_ready()) {
         app_runtime_raise_fault(APP_FAULT_SOURCE_ODOM, 1);
         return;
     }
 
-    /* Entering active control invalidates the previous safe-stop completion. */
+    /* Preparation now advances one nonblocking step per cycle. Check every
+       startup precondition before that step can issue a hardware command */
+    if(!remote_is_manual_requested()) {
+        app_runtime_raise_fault(APP_FAULT_SOURCE_REMOTE, 1);
+        return;
+    }
+    if(s_motor_starting &&
+       (!app_runtime_sticks_centered() ||
+        (ms_t)(delay_now_ms() - s_motor_start_since_ms) >= APP_RUNTIME_STARTUP_TIMEOUT_MS)) {
+        app_runtime_raise_fault(APP_FAULT_SOURCE_CHASSIS, 1);
+        return;
+    }
+
+    /* Entering active control invalidates the previous safe-stop completion */
     s_stop_requested = false;
     s_stop_retry_pending = false;
     status = chassis_set_output_enabled(true);
@@ -116,11 +129,6 @@ void app_runtime_process(void) {
 
     if(s_motor_starting) {
         /* Startup is bounded and keeps zero targets until all feedback is ready */
-        if(!app_runtime_sticks_centered() ||
-           (ms_t)(delay_now_ms() - s_motor_start_since_ms) >= APP_RUNTIME_STARTUP_TIMEOUT_MS) {
-            app_runtime_raise_fault(APP_FAULT_SOURCE_CHASSIS, 1);
-            return;
-        }
         control_result = app_control_hold_zero_chassis();
     }
     else if(!chassis.is_ready()) {
@@ -186,7 +194,7 @@ static void app_runtime_stop(bool force) {
     app_control_reset_chassis();
     s_stop_requested = true;
     s_stop_attempted_this_cycle = true;
-    /* Disabling output already performs the complete chassis stop once. */
+    /* Disabling output already performs the complete chassis stop once */
     status = chassis_set_output_enabled(false);
     s_stop_last_attempt_ms = delay_now_ms();
     s_stop_retry_pending = status != CHASSIS_OK;

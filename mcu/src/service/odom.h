@@ -2,6 +2,7 @@
 #define _odom_h_
 
 #include <stdbool.h>
+#include <stdint.h>
 
 #include "kalman/chassis_imu_odom.h"
 #include "matrix.h"
@@ -47,6 +48,8 @@ typedef struct {
     ChassisImuOdomConfig fusion; /**< 底盘 + IMU 融合配置 */
     float yaw_rate_scale;        /**< odom yaw rate scale，无量纲 */
     float process_period_s;      /**< odom.process() 调用周期，单位 s */
+    uint32_t (*now_us)(void* context); /**< 可选单调微秒时钟；未提供时使用样本时间戳/配置周期 */
+    void* clock_context;
 } OdomConfig;
 
 /**

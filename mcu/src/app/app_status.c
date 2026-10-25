@@ -49,6 +49,7 @@ void app_status_process(void) {
                  fault != NULL ? (long)fault->code : 0l);
         assemble_chassis_log_diagnostics();
         assemble_remote_log_diagnostics();
+        assemble_scheduler_log_diagnostics();
     }
 }
 
