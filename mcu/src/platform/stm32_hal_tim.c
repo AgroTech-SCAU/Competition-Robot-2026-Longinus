@@ -16,8 +16,8 @@ static void (*tim_callback)(void) = NULL;
 /**
  * @brief 启动 TIM6 基本定时器中断
  */
-void tim_start(void) {
-    HAL_TIM_Base_Start_IT(&htim6);
+bool tim_start(void) {
+    return HAL_TIM_Base_Start_IT(&htim6) == HAL_OK;
 }
 
 /**

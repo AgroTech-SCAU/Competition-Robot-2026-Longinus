@@ -2,6 +2,7 @@
 #define _stm32_hal_can_h_
 
 #include <stdint.h>
+#include <stdbool.h>
 
 #include "main.h" // IWYU pragma: keep
 
@@ -28,6 +29,8 @@ extern FDCAN_HandleTypeDef hfdcan2;
     X(NOTIFICATION_FAILED, "CAN Notification Activation Failed") \
     X(TX_MAILBOX_TIMEOUT, "CAN TX Mailbox Timeout") \
     X(TX_FAILED, "CAN TX Failed") \
+    X(TX_FIFO_FULL, "CAN TX FIFO Full") \
+    X(TX_CANCEL_FAILED, "CAN TX Cancel Failed") \
     X(RX_FAILED, "CAN RX Failed") \
     X(NO_CALLBACK_SLOT, "No CAN RX Callback Slot")
 
@@ -38,6 +41,25 @@ extern FDCAN_HandleTypeDef hfdcan2;
 typedef enum {
     STM32_HAL_CAN_STATUS_TABLE
 } BspCanStatus;
+
+/** Failure fields are latched; bus fields refresh only on failure or explicit polling. */
+typedef struct {
+    uint32_t received_frames;
+    uint32_t last_rx_id;
+    uint32_t last_rx_ms;
+    uint32_t tx_success_count;
+    uint32_t tx_failure_count;
+    BspCanStatus last_tx_status;
+    BspCanStatus last_failure;
+    uint32_t last_failure_id;
+    uint32_t last_failure_ms;
+    uint32_t tx_fifo_free;
+    uint32_t hal_error;
+    uint32_t last_error_code;
+    uint32_t tx_error_count;
+    uint32_t rx_error_count;
+    bool bus_off;
+} BspCanDiagnostics;
 #undef X
 
 /**
@@ -92,6 +114,12 @@ BspCanStatus can_register_rx_callback(FDCAN_HandleTypeDef* hcan, STM32HalCanRxCa
  * @return const char* 状态码名称
  */
 const char* can_error_code_to_str(BspCanStatus status);
+
+BspCanStatus can_get_diagnostics(FDCAN_HandleTypeDef* hcan, BspCanDiagnostics* out);
+/** Refresh readable bus status at diagnostic frequency, outside interrupt handlers. */
+void can_refresh_diagnostics(FDCAN_HandleTypeDef* hcan);
+/** Request cancellation of the current pending snapshot; does not wait for completion. */
+BspCanStatus can_cancel_tx(FDCAN_HandleTypeDef* hcan);
 
 uint32_t can_critical_enter(void);
 void can_critical_exit(uint32_t state);

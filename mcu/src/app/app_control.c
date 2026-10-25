@@ -74,14 +74,22 @@ AppControlResult app_control_apply_manual_chassis(void) {
 }
 
 AppControlResult app_control_brake_chassis(void) {
-    chassis_yaw_hold_reset();
-    s_remote_yaw_target_valid = false;
+    app_control_reset_chassis();
     return app_control_result_from_chassis(chassis.brake(), "brake chassis");
 }
 
-AppControlResult app_control_stop_all(void) {
+void app_control_reset_chassis(void) {
     chassis_yaw_hold_reset();
     s_remote_yaw_target_valid = false;
+}
+
+AppControlResult app_control_hold_zero_chassis(void) {
+    app_control_reset_chassis();
+    return app_control_result_from_chassis(chassis.set_velocity(0.0f, 0.0f, 0.0f), "hold zero chassis velocity");
+}
+
+AppControlResult app_control_stop_all(void) {
+    app_control_reset_chassis();
     return app_control_result_from_chassis(chassis.stop(), "stop chassis");
 }
 

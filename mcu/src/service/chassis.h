@@ -97,6 +97,9 @@ typedef struct {
     BusMotorStatus (*prepare_drive_motor)(BusMotorId id);
     BusMotorStatus (*set_steer_target)(BusMotorId id, float position, float velocity);
     BusMotorStatus (*motor_update)(void);
+    BusMotorStatus (*motor_poll_feedback)(void);
+    BusMotorStatus (*cancel_pending_commands)(void);
+    BusMotorStatus (*disable_drive_motors)(void);
     void (*clear_motor_fault)(void);
     BusMotorGroupId drive_group;
     int8_t drive_sign[CHASSIS_MODULE_COUNT];
@@ -262,6 +265,9 @@ ChassisErrorCode chassis_clear_motor_fault(void);
 
 /** @brief 处理反馈和驱动超时，不生成运动命令 */
 ChassisErrorCode chassis_poll(void);
+
+/** @brief Only drain feedback; never sends motor commands or retries zero output. */
+ChassisErrorCode chassis_poll_feedback(void);
 
 /**
  * @brief 请求底盘进入驻车刹车状态

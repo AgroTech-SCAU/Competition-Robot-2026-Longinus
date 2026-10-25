@@ -23,4 +23,7 @@ SystemStatus assemble_odom(void);
 SystemStatus assemble_remote(void);
 SystemStatus assemble_tim6_500hz(void);
 
+void assemble_chassis_log_diagnostics(void);
+void assemble_remote_log_diagnostics(void);
+
 #endif

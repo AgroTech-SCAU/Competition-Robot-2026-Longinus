@@ -3,6 +3,7 @@ Core/Startup/
 Core/Src/*
 !Core/Src/main.c
 
+.agents/
 build/
 Drivers/
 external/

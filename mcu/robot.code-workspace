@@ -34,7 +34,8 @@
             "editor.insertSpaces": true,
             "editor.tabSize": 4,
             "editor.autoIndent": "advanced"
-        }
+        },
+        "emberprobe.openocdPath": "c:\\Users\\11093\\AppData\\Roaming\\Code\\User\\globalStorage\\bakesheep.emberprobe\\emberprobe\\openocd\\bin\\openocd.exe"
     },
     "extensions": {
         "recommendations": [

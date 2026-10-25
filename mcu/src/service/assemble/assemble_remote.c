@@ -76,3 +76,14 @@ static void remote_rx_complete_callback(void) {
 static void remote_rx_error_callback(void) {
     (void)fs_ia10b_on_rx_error(&s_receiver);
 }
+
+void assemble_remote_log_diagnostics(void) {
+    UartRxDiagnostics uart = { 0 };
+    FsIa10bData receiver = { 0 };
+    if(!uart_get_rx_diagnostics(&huart5, &uart)) return;
+    (void)fs_ia10b_get_data(&s_receiver, &receiver);
+    log_info("RC bytes=%lu uart_errs=%lu last_err=%lx frames=%lu bad=%lu online=%u",
+        (unsigned long)uart.received_bytes, (unsigned long)uart.error_interrupts,
+        (unsigned long)uart.last_error, (unsigned long)receiver.frame_count,
+        (unsigned long)receiver.error_count, remote_is_online(100u) ? 1u : 0u);
+}

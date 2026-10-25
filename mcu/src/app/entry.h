@@ -24,6 +24,9 @@
  * @brief 系统初始化完成标记
  */
 static bool init_ok = false;
+static bool s_entry_log_ready = false;
+static const char* s_entry_failure_stage = "delay";
+static ms_t s_entry_failure_log_ms = 0u;
 
 /**
  * @brief 250Hz 节拍计数器
@@ -55,45 +58,56 @@ static inline bool entry_tick_100hz(void);
  * @brief 系统初始化入口
  * @details 按照启动依赖顺序完成底层装配, 应用层初始化, 最后启动 500Hz 定时调度
  */
+static inline bool entry_boot_check(SystemStatus status, const char* stage) {
+    if(status == SYSTEM_STATUS_OK) return true;
+    s_entry_failure_stage = stage;
+    if(s_entry_log_ready) log_error("BOOT failed at %s", stage);
+    return false;
+}
+
 static inline bool entry_chassis_settle(ms_t interval_ms) {
     const ms_t start = delay_now_ms();
     while((ms_t)(delay_now_ms() - start) < interval_ms) {
         delay_ms(1u);
-        if(chassis_poll() != CHASSIS_OK) return false;
+        if(chassis_poll_feedback() != CHASSIS_OK) {
+            (void)entry_boot_check(SYSTEM_STATUS_ERROR, "chassis feedback");
+            return false;
+        }
     }
     return true;
 }
 
 static inline void entry_init(void) {
-    if(assemble_delay() != SYSTEM_STATUS_OK)
+    if(!entry_boot_check(assemble_delay(), "delay"))
         return;
 
-    if(assemble_log() != SYSTEM_STATUS_OK)
+    if(!entry_boot_check(assemble_log(), "log"))
         return;
+    s_entry_log_ready = true;
     log_info("BOOT log ready");
     delay_ms(100u);
 
-    if(assemble_rgb() != SYSTEM_STATUS_OK)
+    if(!entry_boot_check(assemble_rgb(), "rgb"))
         return;
     log_info("BOOT rgb ready");
     delay_ms(100u);
 
-    if(assemble_imu() != SYSTEM_STATUS_OK)
+    if(!entry_boot_check(assemble_imu(), "imu"))
         return;
     log_info("BOOT imu ready");
     delay_ms(100u);
 
-    if(assemble_odom() != SYSTEM_STATUS_OK)
+    if(!entry_boot_check(assemble_odom(), "odom"))
         return;
     log_info("BOOT odom ready");
     delay_ms(100u);
 
-    if(assemble_chassis() != SYSTEM_STATUS_OK)
+    if(!entry_boot_check(assemble_chassis(), "chassis"))
         return;
     log_info("BOOT chassis ready");
     if(!entry_chassis_settle(100u)) return;
 
-    if(assemble_remote() != SYSTEM_STATUS_OK)
+    if(!entry_boot_check(assemble_remote(), "remote"))
         return;
     log_info("BOOT remote ready");
     if(!entry_chassis_settle(100u)) return;
@@ -107,15 +121,15 @@ static inline void entry_init(void) {
     log_info("BOOT app ready");
     if(!entry_chassis_settle(100u)) return;
 
-    if(assemble_tim6_500hz() != SYSTEM_STATUS_OK)
+    if(!entry_boot_check(assemble_tim6_500hz(), "tim6_500hz"))
         return;
     log_info("BOOT tim6 500hz ready");
     if(!entry_chassis_settle(100u)) return;
 
-    log_info("System initialized successfully");
     if(!entry_chassis_settle(500u)) return;
-
+    tim6_500hz_flag = false;
     init_ok = true;
+    log_info("System initialized successfully");
 }
 
 /**
@@ -124,6 +138,9 @@ static inline void entry_init(void) {
  */
 static inline void entry_loop(void) {
     if(!init_ok) {
+        if(s_entry_log_ready && delay_nb_ms(&s_entry_failure_log_ms, 1000u)) {
+            log_error("BOOT incomplete: stage=%s", s_entry_failure_stage);
+        }
         return;
     }
     if(tim6_500hz_flag) {

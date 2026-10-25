@@ -6,6 +6,15 @@
 #include <stdbool.h>
 #include <stdint.h>
 
+typedef struct {
+    uint32_t received_bytes;
+    uint32_t error_interrupts;
+    uint32_t last_rx_ms;
+    uint32_t last_error;
+} UartRxDiagnostics;
+
+bool uart_get_rx_diagnostics(UART_HandleTypeDef* huart, UartRxDiagnostics* out);
+
 extern UART_HandleTypeDef huart1;
 extern UART_HandleTypeDef huart5;
 

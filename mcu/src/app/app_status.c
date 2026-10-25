@@ -6,6 +6,7 @@
 #include "app_status.h"
 #include "app_fsm.h"
 #include "app_runtime.h"
+#include "assemble/assemble.h"
 #include "chassis.h"
 #include "delay.h"
 #include "log.h"
@@ -46,6 +47,8 @@ void app_status_process(void) {
                  app_runtime_has_fault() ? 1u : 0u,
                  fault != NULL ? (unsigned int)fault->source : 0u,
                  fault != NULL ? (long)fault->code : 0l);
+        assemble_chassis_log_diagnostics();
+        assemble_remote_log_diagnostics();
     }
 }
 

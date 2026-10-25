@@ -14,19 +14,28 @@
 #include <stdlib.h>
 
 #define APP_RUNTIME_STARTUP_TIMEOUT_MS 3000u
+#define APP_RUNTIME_STOP_RETRY_MS 100u
 
 static bool s_manual_edge_armed = false;
 static bool s_motor_starting = false;
 static ms_t s_motor_start_since_ms = 0u;
+static bool s_stop_requested = false;
+static bool s_stop_retry_pending = false;
+static ms_t s_stop_last_attempt_ms = 0u;
+static bool s_stop_attempted_this_cycle = false;
 
 static bool app_runtime_sticks_centered(void);
 static void app_runtime_raise_fault(AppFaultSource source, int32_t code);
-static void app_runtime_stop(void);
+static void app_runtime_stop(bool force);
 
 void app_runtime_init(void) {
     s_manual_edge_armed = false;
     s_motor_starting = false;
     s_motor_start_since_ms = 0u;
+    s_stop_requested = false;
+    s_stop_retry_pending = false;
+    s_stop_last_attempt_ms = 0u;
+    s_stop_attempted_this_cycle = false;
     app_control_init();
     app_fsm_init();
 }
@@ -37,15 +46,18 @@ void app_runtime_process(void) {
     AppControlResult control_result;
     ChassisErrorCode status;
 
+    s_stop_attempted_this_cycle = false;
     if(!online) {
         s_manual_edge_armed = false;
         if(app_fsm_get_state() == APP_FSM_STATE_MANUAL) {
             app_runtime_raise_fault(APP_FAULT_SOURCE_REMOTE, 1);
+            return;
         }
     }
     else if(remote_take_clear_reset_event()) {
         s_manual_edge_armed = false;
-        app_runtime_stop();
+        app_runtime_stop(false);
+        if(s_stop_retry_pending) return;
         if(app_fsm_get_state() == APP_FSM_STATE_FAULT) {
             if(chassis_clear_motor_fault() == CHASSIS_OK) {
                 (void)app_fsm_clear_fault();
@@ -74,10 +86,23 @@ void app_runtime_process(void) {
 
     app_fsm_process();
     if(app_fsm_get_state() != APP_FSM_STATE_MANUAL) {
-        app_runtime_stop();
+        app_runtime_stop(false);
+        status = chassis_poll_feedback();
+        if(status != CHASSIS_OK) {
+            app_runtime_raise_fault(APP_FAULT_SOURCE_CHASSIS, status);
+        }
         return;
     }
 
+    /* Check IMU/fusion readiness before any motor preparation can enable output. */
+    if(!odom.is_ready()) {
+        app_runtime_raise_fault(APP_FAULT_SOURCE_ODOM, 1);
+        return;
+    }
+
+    /* Entering active control invalidates the previous safe-stop completion. */
+    s_stop_requested = false;
+    s_stop_retry_pending = false;
     status = chassis_set_output_enabled(true);
     if(status != CHASSIS_OK) {
         app_runtime_raise_fault(APP_FAULT_SOURCE_CHASSIS, status);
@@ -89,11 +114,6 @@ void app_runtime_process(void) {
         return;
     }
 
-    if(!odom.is_ready()) {
-        app_runtime_raise_fault(APP_FAULT_SOURCE_ODOM, 1);
-        return;
-    }
-
     if(s_motor_starting) {
         /* Startup is bounded and keeps zero targets until all feedback is ready */
         if(!app_runtime_sticks_centered() ||
@@ -101,7 +121,7 @@ void app_runtime_process(void) {
             app_runtime_raise_fault(APP_FAULT_SOURCE_CHASSIS, 1);
             return;
         }
-        control_result = app_control_stop_all();
+        control_result = app_control_hold_zero_chassis();
     }
     else if(!chassis.is_ready()) {
         app_runtime_raise_fault(APP_FAULT_SOURCE_CHASSIS, 1);
@@ -152,16 +172,24 @@ static bool app_runtime_sticks_centered(void) {
            abs((int)data->channel[REMOTE_CH_LEFT_X] - (int)REMOTE_CENTER) <= REMOTE_DEADBAND;
 }
 
-static void app_runtime_stop(void) {
+static void app_runtime_stop(bool force) {
     ChassisErrorCode status;
-    AppControlResult control_result;
 
     s_motor_starting = false;
-    status = chassis_set_output_enabled(false);
-    control_result = app_control_stop_all();
-    if(control_result != APP_CONTROL_RESULT_OK && status == CHASSIS_OK) {
-        status = CHASSIS_MOTOR_COMMAND_FAILED;
+    if(s_stop_attempted_this_cycle) return;
+    if(!force && s_stop_requested &&
+       (!s_stop_retry_pending ||
+        (ms_t)(delay_now_ms() - s_stop_last_attempt_ms) < APP_RUNTIME_STOP_RETRY_MS)) {
+        return;
     }
+
+    app_control_reset_chassis();
+    s_stop_requested = true;
+    s_stop_attempted_this_cycle = true;
+    /* Disabling output already performs the complete chassis stop once. */
+    status = chassis_set_output_enabled(false);
+    s_stop_last_attempt_ms = delay_now_ms();
+    s_stop_retry_pending = status != CHASSIS_OK;
     if(status != CHASSIS_OK) {
         log_warn("APP_RUNTIME safe stop failed: %s", chassis.error_code_to_str(status));
         if(!app_fsm_has_fault()) {
@@ -174,12 +202,14 @@ static void app_runtime_stop(void) {
 }
 
 static void app_runtime_raise_fault(AppFaultSource source, int32_t code) {
+    const bool new_fault = !app_fsm_has_fault();
+
     s_manual_edge_armed = false;
-    if(!app_fsm_has_fault()) {
+    if(new_fault) {
         AppFault fault = { source, APP_FAULT_LEVEL_RECOVERABLE, code, delay_now_ms() };
         log_warn("APP_RUNTIME fault: source=%u code=%ld", (unsigned int)source, (long)code);
         (void)app_fsm_raise_fault(&fault);
         app_fsm_process();
     }
-    app_runtime_stop();
+    app_runtime_stop(new_fault);
 }

@@ -1,4 +1,4 @@
-﻿#include "chassis.h"
+#include "chassis.h"
 
 #include "log.h"
 
@@ -669,8 +669,7 @@ ChassisErrorCode chassis_process(void) {
                 s_chassis.brake_latched = true;
             }
         }
-
-        if(s_chassis.brake_latched) {
+        else {
             for(i = 0u; i < CHASSIS_MODULE_COUNT; ++i) {
                 const ChassisModuleMap* map = &s_module_map[i];
 
@@ -750,7 +749,9 @@ ChassisErrorCode chassis_stop(void) {
     s_chassis.brake_latched = false;
     chassis_reset_steer_speed_profiles();
 
-    result = chassis_motor_status(s_chassis.config.motor_update(), "motor housekeeping");
+    /* RX faults remain latched for runtime to report/clear. They must not make
+     * a successfully transmitted safe stop permanently unrecoverable. */
+    (void)s_chassis.config.motor_poll_feedback();
     const float zero[CHASSIS_MODULE_COUNT] = { 0 };
     if(s_output_enabled && s_chassis.config.feedback_is_valid()) {
         if(chassis_motor_status(chassis_drive_command(zero), "closed-loop drive stop") != ch.OK) {
@@ -758,10 +759,8 @@ ChassisErrorCode chassis_stop(void) {
         }
     }
     else {
-        for(i = 0u; i < CHASSIS_MODULE_COUNT; ++i) {
-            if(chassis_motor_status(bus_motor.basic.disable(s_module_map[i].drive_id), "disable drive") != ch.OK) {
-                result = ch.MOTOR_COMMAND_FAILED;
-            }
+        if(chassis_motor_status(s_chassis.config.disable_drive_motors(), "disable drive bank") != ch.OK) {
+            result = ch.MOTOR_COMMAND_FAILED;
         }
     }
     for(i = 0u; i < CHASSIS_MODULE_COUNT; ++i) {
@@ -774,8 +773,9 @@ ChassisErrorCode chassis_stop(void) {
     if(result != ch.OK && s_output_enabled) {
         /* Failed closed-loop stopping falls back to explicit software disable */
         s_output_enabled = false;
+        (void)chassis_motor_status(s_chassis.config.cancel_pending_commands(), "cancel pending commands");
+        (void)chassis_motor_status(s_chassis.config.disable_drive_motors(), "fallback disable drive bank");
         for(i = 0u; i < CHASSIS_MODULE_COUNT; ++i) {
-            (void)chassis_motor_status(bus_motor.basic.disable(s_module_map[i].drive_id), "fallback disable drive");
             (void)chassis_motor_status(bus_motor.basic.disable(s_module_map[i].steer_id), "fallback disable steer");
         }
     }
@@ -786,7 +786,14 @@ ChassisErrorCode chassis_set_output_enabled(bool enabled) {
     if(!s_chassis.initialized) {
         return ch.NOT_INITIALIZED;
     }
-    if(enabled && !s_output_enabled) {
+    if(!enabled) {
+        /* Remove queued motion before attempting safe frames. Cancellation is asynchronous. */
+        s_output_enabled = false;
+        ChassisErrorCode cancelled = chassis_motor_status(s_chassis.config.cancel_pending_commands(), "cancel pending commands");
+        ChassisErrorCode stopped = chassis_stop();
+        return cancelled != ch.OK ? cancelled : stopped;
+    }
+    if(!s_output_enabled) {
         ChassisErrorCode status = chassis_stop();
         if(status == ch.OK) {
             status = chassis_prepare_steer_motors();
@@ -796,6 +803,7 @@ ChassisErrorCode chassis_set_output_enabled(bool enabled) {
         }
         if(status != ch.OK) {
             s_output_enabled = false;
+            (void)chassis_motor_status(s_chassis.config.cancel_pending_commands(), "cancel pending commands");
             (void)chassis_stop();
             return status;
         }
@@ -803,7 +811,7 @@ ChassisErrorCode chassis_set_output_enabled(bool enabled) {
         s_chassis.drive_motor_ready = false;
     }
     s_output_enabled = enabled;
-    return enabled ? ch.OK : chassis_stop();
+    return ch.OK;
 }
 
 /**
@@ -894,7 +902,9 @@ static ChassisErrorCode chassis_check_config(const ChassisConfig* config) {
         return ch.INVALID_PARAM;
     }
     if(config->prepare_steer_motor == NULL || config->prepare_drive_motor == NULL ||
-       config->set_steer_target == NULL || config->motor_update == NULL || config->clear_motor_fault == NULL || config->feedback_is_valid == NULL) {
+       config->set_steer_target == NULL || config->motor_update == NULL || config->motor_poll_feedback == NULL ||
+       config->cancel_pending_commands == NULL || config->disable_drive_motors == NULL ||
+       config->clear_motor_fault == NULL || config->feedback_is_valid == NULL) {
         return ch.DEPENDENCY_MISSING;
     }
     for(uint8_t i = 0u; i < CHASSIS_MODULE_COUNT; ++i) {
@@ -1333,6 +1343,12 @@ static BusMotorStatus chassis_steer_hold(BusMotorId id) {
 ChassisErrorCode chassis_poll(void) {
     if(!s_chassis.initialized) return ch.NOT_INITIALIZED;
     return chassis_motor_status(s_chassis.config.motor_update(), "motor housekeeping");
+}
+
+ChassisErrorCode chassis_poll_feedback(void) {
+    if(!s_chassis.initialized) return ch.NOT_INITIALIZED;
+    return s_chassis.config.motor_poll_feedback() == MOTOR_STATUS_OK
+        ? ch.OK : ch.MOTOR_COMMAND_FAILED;
 }
 
 ChassisErrorCode chassis_clear_motor_fault(void) {

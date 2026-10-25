@@ -55,6 +55,7 @@ targets:
         - src/domain
         - src/platform
         - src/service
+        - ../external/Embedded-Electronic-Control-Standard/sdks/device
         - ../external/Embedded-Electronic-Control-Standard/sdks/device/bus_motor
         - ../external/Embedded-Electronic-Control-Standard/sdks/device/fs_ia10b
         - ../external/Embedded-Electronic-Control-Standard/sdks/device/imu
@@ -133,6 +134,7 @@ targets:
         - src/domain
         - src/platform
         - src/service
+        - ../external/Embedded-Electronic-Control-Standard/sdks/device
         - ../external/Embedded-Electronic-Control-Standard/sdks/device/bus_motor
         - ../external/Embedded-Electronic-Control-Standard/sdks/device/fs_ia10b
         - ../external/Embedded-Electronic-Control-Standard/sdks/device/imu

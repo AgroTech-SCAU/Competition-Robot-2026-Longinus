@@ -30,6 +30,10 @@ typedef struct {
  * @brief CAN 接收回调槽位表
  */
 static CanRxCallbackSlot s_rx_slots[CAN_RX_CALLBACK_SLOT_NUM];
+static volatile BspCanDiagnostics s_can_diagnostics[2];
+static volatile BspCanDiagnostics* can_diagnostics_for(FDCAN_HandleTypeDef* hcan);
+
+static BspCanStatus can_record_tx(FDCAN_HandleTypeDef* hcan, uint32_t id, BspCanStatus status);
 
 // ! ========================= 私 有 函 数 声 明 ========================= ! //
 
@@ -135,18 +139,14 @@ BspCanStatus can_send(FDCAN_HandleTypeDef* hcan, uint32_t id, const uint8_t* dat
     tx_header.TxEventFifoControl = FDCAN_NO_TX_EVENTS;
     tx_header.MessageMarker = 0u;
 
-    const uint32_t start_ms = HAL_GetTick();
-    while(HAL_FDCAN_GetTxFifoFreeLevel(hcan) == 0u) {
-        if(__get_IPSR() != 0u || (uint32_t)(HAL_GetTick() - start_ms) >= 5u) {
-            return STM32_HAL_CAN_TX_MAILBOX_TIMEOUT;
-        }
+    /* A full hardware FIFO must never stall the 2 ms control loop. */
+    if(HAL_FDCAN_GetTxFifoFreeLevel(hcan) == 0u) {
+        return can_record_tx(hcan, id, STM32_HAL_CAN_TX_FIFO_FULL);
     }
-
     if(HAL_FDCAN_AddMessageToTxFifoQ(hcan, &tx_header, (uint8_t*)data) != HAL_OK) {
-        return STM32_HAL_CAN_TX_FAILED;
+        return can_record_tx(hcan, id, STM32_HAL_CAN_TX_FAILED);
     }
-
-    return STM32_HAL_CAN_OK;
+    return can_record_tx(hcan, id, STM32_HAL_CAN_OK);
 }
 
 /**
@@ -273,6 +273,12 @@ static BspCanStatus can_config_global_filter(FDCAN_HandleTypeDef* hcan) {
  */
 static void can_dispatch_rx(FDCAN_HandleTypeDef* hcan, const FDCAN_RxHeaderTypeDef* header, const uint8_t data[8]) {
     uint8_t i;
+    volatile BspCanDiagnostics* diagnostic = can_diagnostics_for(hcan);
+    if(diagnostic != NULL) {
+        ++diagnostic->received_frames;
+        diagnostic->last_rx_id = header->Identifier;
+        diagnostic->last_rx_ms = HAL_GetTick();
+    }
 
     for(i = 0u; i < CAN_RX_CALLBACK_SLOT_NUM; ++i) {
         if(s_rx_slots[i].hcan == hcan && s_rx_slots[i].callback != NULL) {
@@ -308,4 +314,64 @@ uint32_t can_critical_enter(void) {
 void can_critical_exit(uint32_t state) {
     __DMB();
     __set_PRIMASK(state);
+}
+
+static volatile BspCanDiagnostics* can_diagnostics_for(FDCAN_HandleTypeDef* hcan) {
+    if(hcan == &hfdcan1) return &s_can_diagnostics[0];
+    if(hcan == &hfdcan2) return &s_can_diagnostics[1];
+    return NULL;
+}
+
+static BspCanStatus can_record_tx(FDCAN_HandleTypeDef* hcan, uint32_t id, BspCanStatus status) {
+    volatile BspCanDiagnostics* diagnostic = can_diagnostics_for(hcan);
+    if(diagnostic == NULL) return status;
+    diagnostic->last_tx_status = status;
+    if(status == STM32_HAL_CAN_OK) {
+        ++diagnostic->tx_success_count;
+        return status;
+    }
+    ++diagnostic->tx_failure_count;
+    diagnostic->last_failure = status;
+    diagnostic->last_failure_id = id;
+    diagnostic->last_failure_ms = HAL_GetTick();
+    can_refresh_diagnostics(hcan);
+    return status;
+}
+
+BspCanStatus can_get_diagnostics(FDCAN_HandleTypeDef* hcan, BspCanDiagnostics* out) {
+    volatile BspCanDiagnostics* diagnostic = can_diagnostics_for(hcan);
+    if(diagnostic == NULL || out == NULL) return STM32_HAL_CAN_INVALID_PARAM;
+    const uint32_t irq_state = can_critical_enter();
+    *out = *diagnostic;
+    can_critical_exit(irq_state);
+    return STM32_HAL_CAN_OK;
+}
+
+void can_refresh_diagnostics(FDCAN_HandleTypeDef* hcan) {
+    volatile BspCanDiagnostics* diagnostic = can_diagnostics_for(hcan);
+    if(diagnostic == NULL) return;
+    FDCAN_ProtocolStatusTypeDef protocol = { 0 };
+    FDCAN_ErrorCountersTypeDef counters = { 0 };
+    diagnostic->tx_fifo_free = HAL_FDCAN_GetTxFifoFreeLevel(hcan);
+    diagnostic->hal_error = hcan->ErrorCode;
+    if(HAL_FDCAN_GetProtocolStatus(hcan, &protocol) == HAL_OK) {
+        if(protocol.LastErrorCode != FDCAN_PROTOCOL_ERROR_NO_CHANGE) {
+            diagnostic->last_error_code = protocol.LastErrorCode;
+        }
+        diagnostic->bus_off = protocol.BusOff != 0u;
+    }
+    if(HAL_FDCAN_GetErrorCounters(hcan, &counters) == HAL_OK) {
+        diagnostic->tx_error_count = counters.TxErrorCnt;
+        diagnostic->rx_error_count = counters.RxErrorCnt;
+    }
+}
+
+BspCanStatus can_cancel_tx(FDCAN_HandleTypeDef* hcan) {
+    if(can_diagnostics_for(hcan) == NULL) return STM32_HAL_CAN_INVALID_PARAM;
+    const uint32_t pending = hcan->Instance->TXBRP;
+    if(pending == 0u) return STM32_HAL_CAN_OK;
+    if(HAL_FDCAN_AbortTxRequest(hcan, pending) != HAL_OK) {
+        return can_record_tx(hcan, 0u, STM32_HAL_CAN_TX_CANCEL_FAILED);
+    }
+    return STM32_HAL_CAN_OK;
 }

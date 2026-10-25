@@ -41,6 +41,16 @@ AppControlResult app_control_apply_manual_chassis(void);
 AppControlResult app_control_brake_chassis(void);
 
 /**
+ * @brief 清除航向保持和遥控目标缓存，不访问电机
+ */
+void app_control_reset_chassis(void);
+
+/**
+ * @brief 仅设置零速目标，由本周期 chassis.process() 保持当前舵角并执行
+ */
+AppControlResult app_control_hold_zero_chassis(void);
+
+/**
  * @brief 清零目标并立即请求电机停止
  * @details 与驻车刹车和硬件急停分别处理
  */

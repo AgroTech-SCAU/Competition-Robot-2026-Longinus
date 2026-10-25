@@ -2,6 +2,7 @@
 #define _stm32_hal_tim_h_
 
 #include "main.h" // IWYU pragma: keep
+#include <stdbool.h>
 
 // ! ========================= 接 口 变 量 / Typedef 声 明 ========================= ! //
 
@@ -15,7 +16,7 @@ extern TIM_HandleTypeDef htim6;
 /**
  * @brief 启动 TIM6 基本定时器中断
  */
-void tim_start(void);
+bool tim_start(void);
 
 /**
  * @brief 停止 TIM6 基本定时器中断
