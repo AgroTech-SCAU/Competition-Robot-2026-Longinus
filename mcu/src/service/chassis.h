@@ -107,6 +107,8 @@ typedef struct {
     BusMotorId drive_ids[CHASSIS_MODULE_COUNT];
     int8_t drive_sign[CHASSIS_MODULE_COUNT];
     bool (*feedback_is_valid)(void);
+    /* Passive transport health and arrival freshness, independent of output */
+    bool (*feedback_is_healthy)(void);
     SteerWheelModel model;
     float wheel_drive_ratio;
     ChassisSteerTargetMode steer_target_mode;
@@ -187,15 +189,14 @@ extern const struct ChassisInterface {
      */
     ChassisErrorCode (*brake)(void);
     /**
-     * @brief 判断底盘是否已经就绪
-     *
-     * 该状态只表示转向电机反馈已经正常
-     * 上层若要整机可遥控，还需要同时检查遥控链路
-     *
-     * @return true 底盘转向反馈已就绪
-     * @return false 底盘仍在等待转向反馈
+     * @brief 判断底盘是否已完成运动准备
+     * @details 检查转向和驱动已准备、控制模式与使能反馈
      */
     bool (*is_ready)(void);
+    /** @brief 被动检查全部电机反馈和传输健康，不要求输出使能 */
+    bool (*is_feedback_ready)(void);
+    /** @brief 查询本次初始化后被动自检是否曾通过，失能后的静默不撤销通过记录 */
+    bool (*is_self_check_passed)(void);
     /**
      * @brief 获取底盘实例只读视图
      * @return const Chassis* 底盘实例指针
@@ -279,15 +280,24 @@ ChassisErrorCode chassis_poll_feedback(void);
 ChassisErrorCode chassis_brake(void);
 
 /**
- * @brief 判断底盘是否已经就绪
- *
- * 该函数用于 RGB 指示和上层状态判断
- * 不会触发新的控制动作
- *
- * @return true 底盘转向反馈已就绪
- * @return false 底盘仍在等待转向反馈
+ * @brief 判断底盘是否已完成运动准备
+ * @details 不会触发控制动作，遥控在线性由应用另行判断
  */
 bool chassis_is_ready(void);
+
+/**
+ * @brief 被动检查底盘电机反馈，允许电机处于失能状态
+ * @details 要求全部反馈新鲜、位置或速度有效、运行状态无故障且传输健康
+ * 不检查激活的 Profile，不发送命令或启动电机准备
+ */
+bool chassis_is_feedback_ready(void);
+
+/**
+ * @brief 查询被动自检的历史通过记录，不代表当前可运动
+ * @details 传输故障或新鲜无效反馈会撤销记录，单纯失能静默不会撤销
+ * 初始化与显式清故障会重新开始自检
+ */
+bool chassis_is_self_check_passed(void);
 
 /**
  * @brief 获取底盘实例只读视图

@@ -43,13 +43,14 @@ void app_runtime_init(void) {
 void app_runtime_process(void) {
     const bool online = remote_is_online(100u);
     const bool manual_request = remote_is_manual_requested();
+    const bool auto_request = remote_is_auto_requested();
     AppControlResult control_result;
     ChassisErrorCode status;
 
     s_stop_attempted_this_cycle = false;
     if(!online) {
         s_manual_edge_armed = false;
-        if(app_fsm_get_state() == APP_FSM_STATE_MANUAL) {
+        if(app_fsm_get_state() == APP_FSM_STATE_MANUAL || app_fsm_get_state() == APP_FSM_STATE_AUTO) {
             app_runtime_raise_fault(APP_FAULT_SOURCE_REMOTE, 1);
             return;
         }
@@ -69,23 +70,58 @@ void app_runtime_process(void) {
         app_fsm_process();
         return;
     }
+    else if(auto_request) {
+        s_manual_edge_armed = true;
+        bool stopped_for_switch = false;
+        if(app_fsm_get_state() == APP_FSM_STATE_MANUAL) {
+            app_runtime_stop(false);
+            if(s_stop_retry_pending) return;
+            stopped_for_switch = true;
+        }
+        if(app_fsm_get_state() == APP_FSM_STATE_IDLE || app_fsm_get_state() == APP_FSM_STATE_MANUAL) {
+            s_motor_starting = true;
+            s_motor_start_since_ms = delay_now_ms();
+            (void)app_fsm_post(APP_FSM_EVENT_SWITCH_TO_AUTO);
+            if(stopped_for_switch) {
+                app_fsm_process();
+                return;
+            }
+        }
+    }
     else if(!manual_request) {
         /* Only a fresh non-manual selection can arm the next manual request */
         s_manual_edge_armed = true;
-        if(app_fsm_get_state() == APP_FSM_STATE_MANUAL) {
+        if(app_fsm_get_state() == APP_FSM_STATE_MANUAL || app_fsm_get_state() == APP_FSM_STATE_AUTO) {
             (void)app_fsm_post(APP_FSM_EVENT_STOP);
         }
     }
-    else if(app_fsm_get_state() == APP_FSM_STATE_IDLE && s_manual_edge_armed &&
-            app_runtime_sticks_centered()) {
-        s_manual_edge_armed = false;
-        s_motor_starting = true;
-        s_motor_start_since_ms = delay_now_ms();
-        (void)app_fsm_post(APP_FSM_EVENT_SWITCH_TO_MANUAL);
+    else {
+        bool stopped_for_switch = false;
+        if(app_fsm_get_state() == APP_FSM_STATE_AUTO) {
+            app_runtime_stop(false);
+            if(s_stop_retry_pending) return;
+            (void)app_fsm_post(APP_FSM_EVENT_STOP);
+            app_fsm_process();
+            stopped_for_switch = true;
+        }
+        if(app_fsm_get_state() == APP_FSM_STATE_IDLE && s_manual_edge_armed &&
+           app_runtime_sticks_centered()) {
+            s_manual_edge_armed = false;
+            s_motor_starting = true;
+            s_motor_start_since_ms = delay_now_ms();
+            (void)app_fsm_post(APP_FSM_EVENT_SWITCH_TO_MANUAL);
+            if(stopped_for_switch) {
+                app_fsm_process();
+                return;
+            }
+        }
     }
 
     app_fsm_process();
-    if(app_fsm_get_state() != APP_FSM_STATE_MANUAL) {
+    const AppFsmStateId state = app_fsm_get_state();
+    const bool manual_mode = state == APP_FSM_STATE_MANUAL;
+    const bool auto_mode = state == APP_FSM_STATE_AUTO;
+    if(!manual_mode && !auto_mode) {
         app_runtime_stop(false);
         status = chassis_poll_feedback();
         if(status != CHASSIS_OK) {
@@ -102,12 +138,13 @@ void app_runtime_process(void) {
 
     /* Preparation now advances one nonblocking step per cycle. Check every
        startup precondition before that step can issue a hardware command */
-    if(!remote_is_manual_requested()) {
+    if((manual_mode && !remote_is_manual_requested()) ||
+       (auto_mode && !remote_is_auto_requested())) {
         app_runtime_raise_fault(APP_FAULT_SOURCE_REMOTE, 1);
         return;
     }
     if(s_motor_starting &&
-       (!app_runtime_sticks_centered() ||
+       ((manual_mode && !app_runtime_sticks_centered()) ||
         (ms_t)(delay_now_ms() - s_motor_start_since_ms) >= APP_RUNTIME_STARTUP_TIMEOUT_MS)) {
         app_runtime_raise_fault(APP_FAULT_SOURCE_CHASSIS, 1);
         return;
@@ -122,7 +159,8 @@ void app_runtime_process(void) {
         return;
     }
 
-    if(!remote_is_manual_requested()) {
+    if((manual_mode && !remote_is_manual_requested()) ||
+       (auto_mode && !remote_is_auto_requested())) {
         app_runtime_raise_fault(APP_FAULT_SOURCE_REMOTE, 1);
         return;
     }
@@ -135,8 +173,12 @@ void app_runtime_process(void) {
         app_runtime_raise_fault(APP_FAULT_SOURCE_CHASSIS, 1);
         return;
     }
-    else {
+    else if(manual_mode) {
         control_result = app_control_apply_manual_chassis();
+    }
+    else {
+        /* Autonomous tasks own chassis service targets after zero-speed startup */
+        control_result = APP_CONTROL_RESULT_OK;
     }
 
     if(control_result != APP_CONTROL_RESULT_OK && control_result != APP_CONTROL_RESULT_SKIPPED) {
@@ -169,6 +211,11 @@ const AppFault* app_runtime_get_fault(void) {
 
 bool app_runtime_has_fault(void) {
     return app_fsm_has_fault();
+}
+
+bool app_runtime_is_self_check_passed(void) {
+    return !app_fsm_has_fault() && app_fsm_get_state() != APP_FSM_STATE_ESTOP &&
+           remote_is_online(100u) && odom.is_ready() && chassis.is_self_check_passed();
 }
 
 static bool app_runtime_sticks_centered(void) {

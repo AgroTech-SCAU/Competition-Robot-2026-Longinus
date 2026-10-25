@@ -15,6 +15,7 @@ typedef struct {
     Hfsm fsm;
     HfsmState* idle;
     HfsmState* manual;
+    HfsmState* autonomous;
     HfsmState* fault;
     HfsmState* estop;
     AppFsmStateId current_state;
@@ -32,10 +33,12 @@ static AppFsmContext* app_fsm_context_from_machine(HfsmMachine* machine);
 static bool app_fsm_post_high_priority(AppFsmEventId event_id);
 static HfsmResult app_fsm_handle_idle(HfsmMachine* machine, const HfsmEvent* event);
 static HfsmResult app_fsm_handle_manual(HfsmMachine* machine, const HfsmEvent* event);
+static HfsmResult app_fsm_handle_auto(HfsmMachine* machine, const HfsmEvent* event);
 static HfsmResult app_fsm_handle_fault(HfsmMachine* machine, const HfsmEvent* event);
 static HfsmResult app_fsm_handle_estop(HfsmMachine* machine, const HfsmEvent* event);
 static void app_fsm_on_idle_entry(HfsmMachine* machine);
 static void app_fsm_on_manual_entry(HfsmMachine* machine);
+static void app_fsm_on_auto_entry(HfsmMachine* machine);
 static void app_fsm_on_fault_entry(HfsmMachine* machine);
 static void app_fsm_on_estop_entry(HfsmMachine* machine);
 
@@ -48,16 +51,19 @@ void app_fsm_init(void) {
 
     s_app_fsm.idle = hfsm.add_state(&s_app_fsm.fsm, "Idle");
     s_app_fsm.manual = hfsm.add_state(&s_app_fsm.fsm, "Manual");
+    s_app_fsm.autonomous = hfsm.add_state(&s_app_fsm.fsm, "Auto");
     s_app_fsm.fault = hfsm.add_state(&s_app_fsm.fsm, "Fault");
     s_app_fsm.estop = hfsm.add_state(&s_app_fsm.fsm, "EStop");
 
     (void)hfsm.set_handle(s_app_fsm.idle, app_fsm_handle_idle);
     (void)hfsm.set_handle(s_app_fsm.manual, app_fsm_handle_manual);
+    (void)hfsm.set_handle(s_app_fsm.autonomous, app_fsm_handle_auto);
     (void)hfsm.set_handle(s_app_fsm.fault, app_fsm_handle_fault);
     (void)hfsm.set_handle(s_app_fsm.estop, app_fsm_handle_estop);
 
     (void)hfsm.set_entry(s_app_fsm.idle, app_fsm_on_idle_entry);
     (void)hfsm.set_entry(s_app_fsm.manual, app_fsm_on_manual_entry);
+    (void)hfsm.set_entry(s_app_fsm.autonomous, app_fsm_on_auto_entry);
     (void)hfsm.set_entry(s_app_fsm.fault, app_fsm_on_fault_entry);
     (void)hfsm.set_entry(s_app_fsm.estop, app_fsm_on_estop_entry);
 
@@ -114,6 +120,8 @@ const char* app_fsm_state_str(AppFsmStateId state) {
             return "Idle";
         case APP_FSM_STATE_MANUAL:
             return "Manual";
+        case APP_FSM_STATE_AUTO:
+            return "Auto";
         case APP_FSM_STATE_FAULT:
             return "Fault";
         case APP_FSM_STATE_ESTOP:
@@ -145,6 +153,9 @@ static HfsmResult app_fsm_handle_idle(HfsmMachine* machine, const HfsmEvent* eve
         case APP_FSM_EVENT_SWITCH_TO_MANUAL:
             return hfsm.res.transition(context->manual);
 
+        case APP_FSM_EVENT_SWITCH_TO_AUTO:
+            return hfsm.res.transition(context->autonomous);
+
         case APP_FSM_EVENT_STOP:
             return hfsm.res.handled();
 
@@ -167,6 +178,34 @@ static HfsmResult app_fsm_handle_manual(HfsmMachine* machine, const HfsmEvent* e
     }
 
     switch((AppFsmEventId)event->id) {
+
+        case APP_FSM_EVENT_SWITCH_TO_AUTO:
+            return hfsm.res.transition(context->autonomous);
+
+        case APP_FSM_EVENT_STOP:
+            return hfsm.res.transition(context->idle);
+
+        case APP_FSM_EVENT_FAULT:
+            return hfsm.res.transition(context->fault);
+
+        case APP_FSM_EVENT_ESTOP:
+            return hfsm.res.transition(context->estop);
+
+        default:
+            return hfsm.res.ignore();
+    }
+}
+
+static HfsmResult app_fsm_handle_auto(HfsmMachine* machine, const HfsmEvent* event) {
+    AppFsmContext* context = app_fsm_context_from_machine(machine);
+
+    if(context == NULL || event == NULL) {
+        return hfsm.res.ignore();
+    }
+
+    switch((AppFsmEventId)event->id) {
+        case APP_FSM_EVENT_SWITCH_TO_MANUAL:
+            return hfsm.res.transition(context->manual);
 
         case APP_FSM_EVENT_STOP:
             return hfsm.res.transition(context->idle);
@@ -225,6 +264,14 @@ static void app_fsm_on_manual_entry(HfsmMachine* machine) {
 
     if(context != NULL) {
         context->current_state = APP_FSM_STATE_MANUAL;
+    }
+}
+
+static void app_fsm_on_auto_entry(HfsmMachine* machine) {
+    AppFsmContext* context = app_fsm_context_from_machine(machine);
+
+    if(context != NULL) {
+        context->current_state = APP_FSM_STATE_AUTO;
     }
 }
 

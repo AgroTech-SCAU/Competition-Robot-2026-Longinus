@@ -75,6 +75,7 @@ static BusMotorStatus chassis_receive_feedback(void);
 static BusMotorStatus chassis_motor_update(void);
 static BusMotorStatus chassis_disable_drive_motors(void);
 static bool chassis_feedback_is_valid(void);
+static bool chassis_feedback_is_healthy(void);
 static BusMotorStatus chassis_cancel_pending_commands(void);
 static void chassis_reset_transport(void);
 static BusMotorStatus chassis_prepare_steer_motor(BusMotorId id);
@@ -115,6 +116,7 @@ SystemStatus assemble_chassis(void) {
         .drive_group = CHASSIS_DRIVE_GROUP,
         .drive_sign = { 1, -1, -1, 1 },
         .feedback_is_valid = chassis_feedback_is_valid,
+        .feedback_is_healthy = chassis_feedback_is_healthy,
         .model = { .length = 0.129f, .width = 0.129f, .wheel_radius = 0.035276f, .max_wheel_linear_speed = 2.0f },
         .wheel_drive_ratio = 1.0f,
         .steer_target_mode = CHASSIS_STEER_TARGET_ABS_NEAREST,
@@ -265,6 +267,16 @@ static BusMotorStatus chassis_motor_update(void) {
     return received != MOTOR_STATUS_OK ? received : updated;
 }
 static BusMotorStatus chassis_disable_drive_motors(void) { return dji_motor_bus_disable_all(&s_drive_bus); }
+static bool chassis_feedback_is_healthy(void) {
+    if(s_receive_error != MOTOR_STATUS_OK || s_steer_rx.overflow || s_drive_rx.overflow)
+        return false;
+    for(uint8_t slot = 0u; slot < CHASSIS_MOTOR_COUNT; ++slot) {
+        if(!s_feedback_seen[slot] ||
+           (uint32_t)(HAL_GetTick() - s_feedback_ms[slot]) >= CHASSIS_FEEDBACK_TIMEOUT_MS)
+            return false;
+    }
+    return true;
+}
 static bool chassis_feedback_is_valid(void) {
     if(s_receive_error != MOTOR_STATUS_OK) return false;
     for(uint8_t role = 0u; role < 2u; ++role) {

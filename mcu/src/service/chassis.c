@@ -162,6 +162,7 @@ typedef struct {
 static Chassis s_chassis = { 0 };
 static bool s_output_enabled = false;
 static bool s_preparing = false;
+static bool s_self_check_passed = false;
 static uint8_t s_prepare_steer_index;
 static uint8_t s_prepare_drive_index;
 /**
@@ -246,6 +247,8 @@ const struct ChassisInterface chassis_interface = {
     .stop = chassis_stop,
     .brake = chassis_brake,
     .is_ready = chassis_is_ready,
+    .is_feedback_ready = chassis_is_feedback_ready,
+    .is_self_check_passed = chassis_is_self_check_passed,
     .get_chassis = chassis_get_chassis,
     .get_state = chassis_get_state,
     .get_control = chassis_get_control,
@@ -485,6 +488,7 @@ static bool chassis_brake_targets_reached(void);
  * @return ChassisErrorCode 状态码
  */
 ChassisErrorCode chassis_init(const ChassisConfig* config) {
+    s_self_check_passed = false;
     ChassisErrorCode config_status = chassis_check_config(config);
 
     log_info("CHASSIS init begin");
@@ -639,6 +643,8 @@ ChassisErrorCode chassis_process(void) {
         (void)chassis_stop();
         return ch.MOTOR_COMMAND_FAILED;
     }
+
+    s_self_check_passed = true;
 
     for(i = 0u; i < CHASSIS_MODULE_COUNT; ++i) {
         const ChassisModuleMap* map = &s_module_map[i];
@@ -895,6 +901,55 @@ bool chassis_is_ready(void) {
            s_chassis.config.feedback_is_valid();
 }
 
+static bool chassis_feedback_sample_is_usable(const BusMotorFeedback* feedback, bool steer) {
+    const uint32_t fields = BUS_MOTOR_FEEDBACK_STATE |
+        (steer ? BUS_MOTOR_FEEDBACK_POSITION : BUS_MOTOR_FEEDBACK_VELOCITY);
+    return (feedback->valid & fields) == fields &&
+           (feedback->state == BUS_MOTOR_STATE_DISABLED || feedback->state == BUS_MOTOR_STATE_ENABLED) &&
+           isfinite(steer ? feedback->position : feedback->velocity);
+}
+
+bool chassis_is_feedback_ready(void) {
+    if(!s_chassis.initialized || !s_chassis.config.feedback_is_healthy()) return false;
+    for(uint8_t i = 0u; i < CHASSIS_MODULE_COUNT; ++i) {
+        BusMotorFeedback feedback;
+        if(bus_motor.feedback.all(s_module_map[i].steer_id, &feedback) != MOTOR_STATUS_OK ||
+           !chassis_feedback_sample_is_usable(&feedback, true)) {
+            return false;
+        }
+        if(bus_motor.feedback.all(s_module_map[i].drive_id, &feedback) != MOTOR_STATUS_OK ||
+           !chassis_feedback_sample_is_usable(&feedback, false)) {
+            return false;
+        }
+    }
+    return true;
+}
+
+bool chassis_is_self_check_passed(void) {
+    return s_chassis.initialized && s_self_check_passed;
+}
+
+static void chassis_refresh_self_check(void) {
+    if(chassis_is_feedback_ready()) {
+        s_self_check_passed = true;
+        return;
+    }
+    /* A disabled DM may become silent after its final acknowledgement
+     * Retain the completed self-check while still rejecting observed faults */
+    for(uint8_t role = 0u; role < 2u; ++role) {
+        for(uint8_t i = 0u; i < CHASSIS_MODULE_COUNT; ++i) {
+            BusMotorFeedback feedback;
+            const BusMotorId id = role == 0u ? s_module_map[i].steer_id : s_module_map[i].drive_id;
+            const BusMotorStatus status = bus_motor.feedback.all(id, &feedback);
+            if(status == MOTOR_STATUS_NO_FEEDBACK || status == MOTOR_STATUS_TIMEOUT) continue;
+            if(status != MOTOR_STATUS_OK || !chassis_feedback_sample_is_usable(&feedback, role == 0u)) {
+                s_self_check_passed = false;
+                return;
+            }
+        }
+    }
+}
+
 /**
  * @brief 将底盘状态码转换为静态字符串
  * @param status 底盘状态码
@@ -927,7 +982,8 @@ static ChassisErrorCode chassis_check_config(const ChassisConfig* config) {
     if(config->prepare_steer_motor == NULL || config->prepare_drive_motor == NULL ||
        config->set_steer_target == NULL || config->motor_update == NULL || config->motor_poll_feedback == NULL ||
        config->cancel_pending_commands == NULL || config->disable_drive_motors == NULL ||
-       config->clear_motor_fault == NULL || config->feedback_is_valid == NULL) {
+       config->clear_motor_fault == NULL || config->feedback_is_valid == NULL ||
+       config->feedback_is_healthy == NULL) {
         return ch.DEPENDENCY_MISSING;
     }
     for(uint8_t i = 0u; i < CHASSIS_MODULE_COUNT; ++i) {
@@ -1374,13 +1430,18 @@ ChassisErrorCode chassis_poll(void) {
 
 ChassisErrorCode chassis_poll_feedback(void) {
     if(!s_chassis.initialized) return ch.NOT_INITIALIZED;
-    return s_chassis.config.motor_poll_feedback() == MOTOR_STATUS_OK
-        ? ch.OK : ch.MOTOR_COMMAND_FAILED;
+    if(s_chassis.config.motor_poll_feedback() != MOTOR_STATUS_OK) {
+        s_self_check_passed = false;
+        return ch.MOTOR_COMMAND_FAILED;
+    }
+    chassis_refresh_self_check();
+    return ch.OK;
 }
 
 ChassisErrorCode chassis_clear_motor_fault(void) {
     if(!s_chassis.initialized) return ch.NOT_INITIALIZED;
     if(s_output_enabled) return ch.INVALID_PARAM;
+    s_self_check_passed = false;
     s_chassis.config.clear_motor_fault();
     s_chassis.steer_motor_ready = false;
     s_chassis.drive_motor_ready = false;

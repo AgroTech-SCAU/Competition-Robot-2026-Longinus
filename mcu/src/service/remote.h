@@ -36,6 +36,7 @@ typedef struct {
     bool manual_request;
     FsIa10bData rc_data;
     uint32_t stamp_ms;
+    bool auto_request;
 } RemoteState;
 
 /** @brief 绑定装配层初始化的接收机实例 */
@@ -50,6 +51,8 @@ bool remote_get_state(RemoteState* out);
 bool remote_is_online(uint32_t timeout_ms);
 
 bool remote_is_manual_requested(void);
+
+bool remote_is_auto_requested(void);
 
 bool remote_take_clear_reset_event(void);
 

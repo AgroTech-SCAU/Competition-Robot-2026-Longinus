@@ -40,9 +40,10 @@ void app_status_process(void) {
 
     app_status_update_led();
     if(delay_nb_ms(&s_log_timer, 1000u)) {
-        log_info("Heartbeat state=%s remote=%u ready=%u fault=%u src=%u code=%ld",
+        log_info("Heartbeat state=%s remote=%u ready=%u active=%u fault=%u src=%u code=%ld",
                  app_fsm_state_str(app_runtime_get_state()),
                  remote_is_online(100u) ? 1u : 0u,
+                 app_runtime_is_self_check_passed() ? 1u : 0u,
                  chassis.is_ready() ? 1u : 0u,
                  app_runtime_has_fault() ? 1u : 0u,
                  fault != NULL ? (unsigned int)fault->source : 0u,
@@ -74,9 +75,10 @@ static void app_status_update_led(void) {
             target_state = APP_LED_STATE_MANUAL;
             break;
 
+        case APP_FSM_STATE_AUTO:
         case APP_FSM_STATE_IDLE:
         default:
-            if(!chassis.is_ready()) {
+            if(!app_runtime_is_self_check_passed()) {
                 target_state = APP_LED_STATE_NOT_READY;
             }
             else {

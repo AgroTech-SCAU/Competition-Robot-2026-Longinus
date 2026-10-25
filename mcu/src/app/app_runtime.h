@@ -42,4 +42,7 @@ const AppFault* app_runtime_get_fault(void);
  */
 bool app_runtime_has_fault(void);
 
+/** @brief 初始化与设备自检已通过，不代表电机输出已经使能 */
+bool app_runtime_is_self_check_passed(void);
+
 #endif
