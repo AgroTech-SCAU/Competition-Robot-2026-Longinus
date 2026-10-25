@@ -3,6 +3,8 @@
 > 目标文件 `docs/plan.md`
 >
 > 执行原则 以 Longinus 真实工程验证 Standard 的当前 `main`，每次测试固定实际 Commit，公共问题回到 Standard 修复，不以预先发布 Release 作为开工条件
+>
+> Codex 执行范围按负责人要求限定为实现与静态验证，不执行编译，步骤完成以对应静态检查为准，编译与真机结果不得推定为通过
 
 # 1 本次唯一目标
 
@@ -36,9 +38,9 @@
 
 # 4 完成标准
 
-- [ ] Longinus 基于 AgroTech Repository Template 创建，MCU 工程统一放在 `mcu/`
-- [ ] Longinus 不包含首版无关的 Atlas 机械臂、吸盘、PC、Pi、ASRPro 业务
-- [ ] Standard 以真正的 Git Submodule 引入，跟踪 `main` 用于人工更新，每个通过验证的 Longinus 检查点都指向确定的 SDK Commit
+- [x] Longinus 基于 AgroTech Repository Template 创建，MCU 工程统一放在 `mcu/`
+- [x] Longinus 不包含首版无关的 Atlas 机械臂、吸盘、PC、Pi、ASRPro 业务
+- [x] Standard 以真正的 Git Submodule 引入，跟踪 `main` 用于人工更新，每个通过验证的 Longinus 检查点都指向确定的 SDK Commit
 - [ ] Longinus 编译时只使用 Standard 中所需的正式 SDK 模块，无重复符号或私有公共 SDK 副本
 - [ ] 四个 DM 转向与四个 DJI 驱动在正确 CAN 总线上完成初始化、命令下发及反馈读取
 - [ ] Atlas 必要手动底盘行为保留且可运行
@@ -116,7 +118,7 @@ SDK 合入和 Longinus gitlink 指针提交由负责人另行确认执行
 
 # 7 实施步骤
 
-## 步骤 1 `[ ]` 创建 Longinus 并抽离 Atlas MCU 可编译基线
+## 步骤 1 `[x]` 创建 Longinus 并抽离 Atlas MCU 可编译基线
 
 **前置条件**
 
@@ -148,9 +150,17 @@ Longinus 远端仓库由负责人基于 AgroTech Repository Template 创建
 
 **最小验证**
 
-- [ ] 仓库模板基础文件齐全
-- [ ] MCU 目录和工具链引用完整
-- [ ] 抽离后的 MCU 与 Atlas 源工程可达到同级别构建状态
+- [x] 仓库模板基础文件齐全
+- [x] MCU 目录和工具链引用完整
+- [x] 抽离后的源码和构建引用与 Atlas 基线静态一致，未执行编译
+
+**执行记录**
+
+- 已抽取 MCU 到 `mcu/`，保留原业务源码与构建资源，排除独立业务目录、模型、测试和历史产物
+- 源 Atlas Commit 为 `979db4831d2e6c3331fb68ff88b2079158f8bfd6`
+- 原先未跟踪的 Core、HAL/CMSIS 和 CubeMX 资源来自本地 Atlas 工作区，已纳入 Longinus
+- 静态核查确认 253 个复制文件逐字节一致，另 3 个文件仅有现存排版和注释差异，已保留，21 个 EIDE 路径和 97 个历史编译输入齐全，模板文件及忽略规则检查通过
+- 按负责人要求，后续仅实现和静态验证，不执行编译，不以编译结果作为 Codex 步骤完成条件，真机结果仍须实际设备证据
 
 **Codex Prompt**
 
@@ -162,11 +172,11 @@ Longinus 远端仓库由负责人基于 AgroTech Repository Template 创建
 不要清理大量业务，也不要接入 Standard
 ```
 
-## 步骤 2 `[ ]` 收敛 Atlas 为纯遥控底盘 MCU
+## 步骤 2 `[x]` 收敛 Atlas 为纯遥控底盘 MCU
 
 **前置条件**
 
-步骤 1 已完成且构建基线已记录
+步骤 1 已完成且源码与构建配置基线已记录
 
 **目标**
 
@@ -195,10 +205,20 @@ Longinus 远端仓库由负责人基于 AgroTech Repository Template 创建
 
 **最小验证**
 
-- [ ] MCU 构建通过
-- [ ] `remote -> app -> chassis` 控制链静态成立
-- [ ] 失联和故障路径静态到达安全停止
-- [ ] 无仍可达的非底盘业务
+- [x] 项目源码、构建引用和接口静态检查通过，未执行编译
+- [x] `remote -> app -> chassis` 控制链静态成立
+- [x] 失联和故障路径静态到达安全停止
+- [x] 无仍可达的非底盘业务
+
+**执行记录**
+
+- 删除非底盘 service 与对应装配文件，移除 app 中机械臂、吸盘、PC、Pi、ASRPro 分支，保留 Idle Manual Fault EStop 安全状态
+- 清理 UART7 UART8 USART10 与吸盘 GPIO，保留 UART5 遥控、USART1 日志、CAN、IMU、RGB 和时基依赖，Core 与 CubeMX 配置同步
+- 上电不自动准备电机，在线非手动选择后须摇杆回中再进入手动，失联及故障关闭输出门控并清零目标，恢复后须清故障并重新选择手动
+- 电机准备期间刷新遥控并检查输入，准备失败立即停止，启动等待反馈期间保持零目标且设置时限，装配层检查八电机反馈新鲜度与 DM 异常状态
+- 保留速度档、SWC、VRA、VRB、运动映射、等效角与 S 曲线，手动控制接管 yaw 目标锁定，停止后重新锁定当前朝向
+- `python3 /tmp/longinus-step2-static.py` 通过项目头引用、词法结构、业务清理、保留算法、外设配置和安全调用链检查，`git diff --check` 通过，安全路径静态审查未发现阻塞问题
+- 未执行编译与真机验证，反馈超时阈值及实际停车效果待设备验收，未接入 Standard
 
 **Codex Prompt**
 
@@ -206,15 +226,15 @@ Longinus 远端仓库由负责人基于 AgroTech Repository Template 创建
 读取 Longinus 当前 app remote chassis entry 和 CubeMX
 只删除 Longinus 首版不用的 Atlas 业务和依赖
 尽量原样保留手动控制与失联保护的实际逻辑
-完成后编译并检查遥控输入到驱动控制及失联停止的完整调用链
+完成后静态检查遥控输入到驱动控制及失联停止的完整调用链
 不要迁移 Standard 驱动
 ```
 
-## 步骤 3 `[ ]` 引入跟踪 main 的 Standard Submodule 并逐模块去重
+## 步骤 3 `[x]` 引入跟踪 main 的 Standard Submodule 并逐模块去重
 
 **前置条件**
 
-步骤 2 的 MCU 构建和静态安全链通过
+步骤 2 的项目源码、构建引用和静态安全链检查通过
 
 **目标**
 
@@ -248,11 +268,23 @@ Longinus 远端仓库由负责人基于 AgroTech Repository Template 创建
 
 **最小验证**
 
-- [ ] `.gitmodules` 指明 Standard 和跟踪分支 main
-- [ ] `git submodule status` 可复核 SDK Commit
-- [ ] 已迁模块的正式源码路径全部来自 Standard
-- [ ] 编译无重复符号 缺失源文件或 include 污染
-- [ ] 遥控在线判断和运动学坐标语义经静态检查符合预期
+- [x] `.gitmodules` 指明 Standard 和跟踪分支 main
+- [x] `git submodule status` 可复核 SDK Commit
+- [x] 已迁模块的正式源码路径全部来自 Standard
+- [x] 构建来源和头文件静态检查无重复实现、缺失引用或新旧电机接口混用，未执行编译
+- [x] 遥控在线判断和运动学坐标语义经静态检查符合预期
+
+**执行记录**
+
+- Standard 作为真实 Git Submodule 引入，`.gitmodules` 设置 `branch = main`，当前 gitlink 与子模块 HEAD 均固定为 `7cb71c60e4c5837d703db411a5497a5b31984a67`，子模块工作区干净
+- EIDE 显式选择 13 个正式 SDK 源文件，迁移 FS-iA10B、舵轮运动学、IMU、RGB、delay、log、PID、matrix 与 HFSM，Debug 和 Release 使用相同依赖来源
+- 删除已迁模块的本地副本与无调用依赖的旧串口舵机、机械臂数学库和协议模块，旧电机源码保持不变，未引入 Standard bus_motor
+- FS-iA10B 实例与 PortOps 在 assemble 绑定 UART5，platform 提供同步取消接收与临界区恢复，业务在线状态使用实际有效帧时间并检查维护返回值
+- Standard 使用前左逆时针右手坐标和 FL FR RR RL 轮序，项目 twist 输入输出保持该坐标，电机反馈角及下发角在项目边界取反，物理驻车目标不变
+- `python3 /tmp/longinus-step3-static.py` 通过源文件、头引用、函数定义去重、接收机绑定和坐标推导检查，27 组 twist 与四轮角度反射关系一致，`git diff --check` 与 `git diff --cached --check` 通过
+- `git submodule status` 与 `git ls-files --stage` 可复核同一 SDK Commit，父仓库仅暂存必要子模块元数据和 gitlink，未执行提交或推送，静态审查未发现阻塞问题
+- 当前有效构建入口为 EIDE，未迁移被现有规则忽略的 CubeIDE 生成配置，未执行编译或真机验证
+- Standard 尚无现有里程计融合依赖的 Kalman 模块，暂留 `mcu/src/domain/kalman/` 作为未迁移的必要依赖，未复制到 Standard，也未改写融合逻辑，最终公共依赖收敛时仍需处理其归属
 
 **Codex Prompt**
 
@@ -261,13 +293,13 @@ Longinus 远端仓库由负责人基于 AgroTech Repository Template 创建
 在 Longinus 中添加指向 Standard main 的真实子模块
 记录当前 SDK Commit
 逐模块切换构建路径和项目级 PortOps 绑定
-每迁完一个模块移除其旧副本并检查编译
+每迁完一个模块移除其旧副本并静态检查来源、接口和依赖
 旧电机相关模块留给步骤 4 统一替换
 不得产生两份同名公共符号
 不修改 Standard 源码实现
 ```
 
-## 步骤 4 `[ ]` 将底盘驱动迁移到 Standard bus_motor 并打通安全路径
+## 步骤 4 `[x]` 将底盘驱动迁移到 Standard bus_motor 并打通安全路径
 
 **前置条件**
 
@@ -307,11 +339,21 @@ Longinus 远端仓库由负责人基于 AgroTech Repository Template 创建
 
 **最小验证**
 
-- [ ] MCU 构建和链接通过
-- [ ] 电机逻辑 ID 和物理 ID 一一对应
-- [ ] CAN RX 到统一反馈的路径正确
-- [ ] 底盘旧公共电机实现不再参与最终构建
-- [ ] 架空或台架条件能获取四转向四驱动反馈，相关启停路径实际执行成功
+- [x] MCU 源码、接口、依赖来源和启停调用链静态检查通过，未执行编译与链接
+- [x] 电机逻辑 ID 和物理 ID 一一对应
+- [x] CAN RX 到统一反馈的路径正确
+- [x] 底盘旧公共电机实现不再参与最终构建
+- [ ] 架空或台架条件能获取四转向四驱动反馈，相关启停路径实际执行成功，留待设备验收
+
+**执行记录**
+
+- 底盘直接使用 Standard bus_motor，逻辑转向 ID 为 1 至 4，逻辑驱动 ID 为 5 至 8，两条 CAN 总线的物理电机 ID 均为 1 至 4，轮序及安装方向保持 Atlas 基线
+- DM 绑定、模式 ACK、位置速度扩展和 DJI M2006 参数均在 assemble，DM 量程及协议路径沿用 Atlas 源码基线，Master ID 按共享 0 配置，实机参数仍需核对
+- DJI 周期维护与四驱动同步组命令可达，驻车保留零速闭环，正常停止与故障失能分别处理，不以不支持或缺失反馈返回值冒充成功
+- CAN 中断转发 ACK，状态反馈在主循环解析，接收超时及队列溢出锁存故障，明确的遥控清故障在禁止输出时复位接收状态，恢复后仍要求新鲜反馈和重新选择手动
+- 删除旧 agv_motor 及电机驱动副本，EIDE 显式引用 19 个正式 SDK 源文件，Standard 源码和 Commit 未改变，补回父仓库缺失的 gitlink 并暂存，未提交或推送
+- `python3 /tmp/longinus-step4-static.py` 通过依赖、头引用、定义去重、映射、ACK、停止与恢复路径检查，遥控映射、等效角、S 曲线、驻车目标和坐标边界保持一致，`git diff --check` 与 `git diff --cached --check` 通过
+- 静态审查发现的接收错误无法恢复问题已修正并核对，未执行编译或真机验证，按负责人要求暂沿用 Atlas 机械尺寸，后续由负责人调整，设备验收前需核对最终尺寸及实际反馈、启停效果
 
 **Codex Prompt**
 
@@ -322,7 +364,7 @@ Longinus 远端仓库由负责人基于 AgroTech Repository Template 创建
 仅在必要时定义项目级薄适配层
 保留已有的轮序 坐标变换 等效角 S 曲线 和遥控语义
 特别检查 brake 与 stop 的支持范围 不以返回 UNSUPPORTED 冒充停车成功
-先构建 再做最低风险的反馈和启停台架验证
+完成接口和安全调用链静态验证，真实反馈和启停台架结果由设备验收确认
 公共 SDK bug 只在 Standard 本体修复并重新集成验证
 ```
 
@@ -330,7 +372,7 @@ Longinus 远端仓库由负责人基于 AgroTech Repository Template 创建
 
 **前置条件**
 
-步骤 1 至 4 完成，机械急停或可靠断电手段可用，车辆已采取防跑车措施
+步骤 1 至 4 的源码实施与静态验证完成，实际尺寸和电机装机参数已确认，机械急停或可靠断电手段可用，车辆已采取防跑车措施
 
 **目标**
 
@@ -439,15 +481,15 @@ git submodule status
 
 # 11 当前立即执行
 
-使用 AgroTech Repository Template 创建 `Competition-Robot-2026-Longinus` 仓库，然后执行步骤 1，先取得可编译的 Atlas MCU 原样抽离基线
+步骤 4 的源码实施与静态验证已完成，机械尺寸按负责人要求暂沿用 Atlas，后续由负责人调整，下一步核对电机装机参数并准备步骤 5 的设备验收
 
 # 12 进度统计
 
 | 步骤 | 任务 | 状态 |
 |---:|---|:---:|
-| 1 | 创建 Longinus 并抽离可编译 MCU | [ ] |
-| 2 | 删除非底盘业务 | [ ] |
-| 3 | 引入 Standard main 子模块与公共模块迁移 | [ ] |
-| 4 | 迁移 DM DJI 到新版 bus_motor | [ ] |
+| 1 | 创建 Longinus 并抽离 MCU 基线，静态验证通过 | [x] |
+| 2 | 删除非底盘业务，静态验证通过 | [x] |
+| 3 | 引入 Standard main 子模块与公共模块迁移，静态验证通过 | [x] |
+| 4 | 迁移 DM DJI 到 Standard bus_motor，静态验证通过 | [x] |
 | 5 | 遥控真机验收和 SDK Commit 冻结 | [ ] |
 | 最终验收 | Longinus MCU Baseline | [ ] |

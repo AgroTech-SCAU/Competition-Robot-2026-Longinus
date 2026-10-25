@@ -1,0 +1,196 @@
+version: "4.1"
+name: robot
+type: ARM
+deviceName: null
+packDir: null
+srcDirs:
+  - Core
+  - Drivers
+  - src
+virtualFolder:
+  name: <virtual_root>
+  files: []
+  folders:
+    - name: Standard
+      files:
+        - path: ../external/Embedded-Electronic-Control-Standard/sdks/device/fs_ia10b/fs_ia10b.c
+        - path: ../external/Embedded-Electronic-Control-Standard/sdks/device/imu/imu.c
+        - path: ../external/Embedded-Electronic-Control-Standard/sdks/device/imu/imu_attitude.c
+        - path: ../external/Embedded-Electronic-Control-Standard/sdks/device/imu/bmi088.c
+        - path: ../external/Embedded-Electronic-Control-Standard/sdks/device/rgb_led/rgb_led.c
+        - path: ../external/Embedded-Electronic-Control-Standard/sdks/device/rgb_led/ws2812_rgb_led.c
+        - path: ../external/Embedded-Electronic-Control-Standard/sdks/domain/steer_wheel_kine.c
+        - path: ../external/Embedded-Electronic-Control-Standard/sdks/infra/delay.c
+        - path: ../external/Embedded-Electronic-Control-Standard/sdks/infra/log.c
+        - path: ../external/Embedded-Electronic-Control-Standard/sdks/infra/pid.c
+        - path: ../external/Embedded-Electronic-Control-Standard/sdks/infra/matrix.c
+        - path: ../external/Embedded-Electronic-Control-Standard/sdks/infra/hfsm/hfsm.c
+        - path: ../external/Embedded-Electronic-Control-Standard/sdks/infra/hfsm/hfsm_core.c
+        - path: ../external/Embedded-Electronic-Control-Standard/sdks/device/bus_motor/bus_motor.c
+        - path: ../external/Embedded-Electronic-Control-Standard/sdks/device/bus_motor/dm_motor.c
+        - path: ../external/Embedded-Electronic-Control-Standard/sdks/device/bus_motor/dji_motor.c
+        - path: ../external/Embedded-Electronic-Control-Standard/sdks/device/bus_motor/dm_motor/dm_motor_core.c
+        - path: ../external/Embedded-Electronic-Control-Standard/sdks/device/bus_motor/dm_motor/dm_motor_protocol_v3.c
+        - path: ../external/Embedded-Electronic-Control-Standard/sdks/device/bus_motor/dm_motor/dm_motor_protocol_v4.c
+      folders: []
+dependenceList: []
+outDir: build
+miscInfo:
+  uid: 20cc9123769990d5fda4ca530d051e9e
+targets:
+  Debug:
+    cppPreprocessAttrs:
+      defineList:
+        - DEBUG
+        - USE_PWR_LDO_SUPPLY
+        - USE_HAL_DRIVER
+        - STM32H723xx
+      incList:
+        - Core/Inc
+        - Drivers/STM32H7xx_HAL_Driver/Inc
+        - Drivers/STM32H7xx_HAL_Driver/Inc/Legacy
+        - Drivers/CMSIS/Device/ST/STM32H7xx/Include
+        - Drivers/CMSIS/Include
+        - src/app
+        - src/domain
+        - src/platform
+        - src/service
+        - ../external/Embedded-Electronic-Control-Standard/sdks/device
+        - ../external/Embedded-Electronic-Control-Standard/sdks/device/bus_motor
+        - ../external/Embedded-Electronic-Control-Standard/sdks/device/fs_ia10b
+        - ../external/Embedded-Electronic-Control-Standard/sdks/device/imu
+        - ../external/Embedded-Electronic-Control-Standard/sdks/device/rgb_led
+        - ../external/Embedded-Electronic-Control-Standard/sdks/domain
+        - ../external/Embedded-Electronic-Control-Standard/sdks/infra
+      libList: []
+    excludeList: []
+    settings: {}
+    toolchain: GCC
+    toolchainConfigMap:
+      GCC:
+        archExtensions: ""
+        cpuType: Cortex-M7
+        floatingPointHardware: single
+        options:
+          version: 5
+          afterBuildTasks: []
+          asm-compiler:
+            ASM_FLAGS: -DDEBUG
+          beforeBuildTasks: []
+          c/cpp-compiler:
+            language-c: c11
+            language-cpp: c++11
+            one-elf-section-per-data: true
+            one-elf-section-per-function: true
+            optimization: level-debug
+            warnings: all-warnings
+          global:
+            $float-abi-type: hard
+            arm-thumb-mode: thumb
+            not-use-syscalls: true
+            output-debug-info: enable
+            use-newlib-nano: true
+          linker:
+            $outputTaskExcludes:
+              - .bin
+            $toolName: auto
+            output-format: elf
+            remove-unused-input-sections: true
+            use-float-printf: true
+        scatterFilePath: STM32H723VGTX_FLASH_USER.ld
+        storageLayout:
+          RAM: []
+          ROM: []
+        useCustomScatterFile: true
+    uploadConfigMap:
+      JLink:
+        baseAddr: ""
+        bin: ""
+        cpuInfo:
+          cpuName: "null"
+          vendor: "null"
+        otherCmds: ""
+        proType: 1
+        speed: 8000
+      OpenOCD:
+        baseAddr: "0x08000000"
+        bin: ""
+        interface: cmsis-dap
+        target: stm32h7x
+    uploader: OpenOCD
+  Release:
+    cppPreprocessAttrs:
+      defineList:
+        - USE_PWR_LDO_SUPPLY
+        - USE_HAL_DRIVER
+        - STM32H723xx
+      incList:
+        - Core/Inc
+        - Drivers/STM32H7xx_HAL_Driver/Inc
+        - Drivers/STM32H7xx_HAL_Driver/Inc/Legacy
+        - Drivers/CMSIS/Device/ST/STM32H7xx/Include
+        - Drivers/CMSIS/Include
+        - src/app
+        - src/domain
+        - src/platform
+        - src/service
+        - ../external/Embedded-Electronic-Control-Standard/sdks/device
+        - ../external/Embedded-Electronic-Control-Standard/sdks/device/bus_motor
+        - ../external/Embedded-Electronic-Control-Standard/sdks/device/fs_ia10b
+        - ../external/Embedded-Electronic-Control-Standard/sdks/device/imu
+        - ../external/Embedded-Electronic-Control-Standard/sdks/device/rgb_led
+        - ../external/Embedded-Electronic-Control-Standard/sdks/domain
+        - ../external/Embedded-Electronic-Control-Standard/sdks/infra
+      libList: []
+    excludeList: []
+    settings: {}
+    toolchain: GCC
+    toolchainConfigMap:
+      GCC:
+        archExtensions: ""
+        cpuType: Cortex-M7
+        floatingPointHardware: single
+        options:
+          version: 5
+          afterBuildTasks: []
+          asm-compiler:
+            ASM_FLAGS: ""
+          beforeBuildTasks: []
+          c/cpp-compiler:
+            CXX_FLAGS: ""
+            C_FLAGS: ""
+            language-c: c11
+            language-cpp: c++11
+            one-elf-section-per-data: true
+            one-elf-section-per-function: true
+            optimization: level-debug
+            warnings: all-warnings
+          global:
+            $float-abi-type: hard
+            misc-control: []
+            not-use-syscalls: true
+            output-debug-info: enable
+            use-newlib-nano: true
+          linker:
+            $outputTaskExcludes:
+              - .bin
+            LD_FLAGS: ""
+            LIB_FLAGS: ""
+            output-format: elf
+            remove-unused-input-sections: true
+        scatterFilePath: STM32H723VGTX_FLASH.ld
+        storageLayout:
+          RAM: []
+          ROM: []
+        useCustomScatterFile: true
+    uploadConfigMap:
+      JLink:
+        baseAddr: ""
+        bin: ""
+        cpuInfo:
+          cpuName: "null"
+          vendor: "null"
+        otherCmds: ""
+        proType: 1
+        speed: 8000
+    uploader: JLink
