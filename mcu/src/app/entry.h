@@ -44,13 +44,13 @@ static uint8_t s_entry_100hz_tick = 0u;
  * @brief 判断当前 500Hz 周期是否命中 250Hz 节拍
  * @return bool `true` 表示应执行 250Hz 任务
  */
-static inline bool entry_tick_250hz(void);
+static inline bool entry_tick_250hz(uint32_t elapsed_ticks);
 
 /**
  * @brief 判断当前 500Hz 周期是否命中 100Hz 节拍
  * @return bool `true` 表示应执行 100Hz 任务
  */
-static inline bool entry_tick_100hz(void);
+static inline bool entry_tick_100hz(uint32_t elapsed_ticks);
 
 // ! ========================= 接 口 函 数 实 现 ========================= ! //
 
@@ -127,7 +127,7 @@ static inline void entry_init(void) {
     if(!entry_chassis_settle(100u)) return;
 
     if(!entry_chassis_settle(500u)) return;
-    tim6_500hz_flag = false;
+    assemble_scheduler_reset();
     init_ok = true;
     log_info("System initialized successfully");
 }
@@ -143,29 +143,34 @@ static inline void entry_loop(void) {
         }
         return;
     }
-    if(tim6_500hz_flag) {
-        tim6_500hz_flag = false;
-        if(entry_tick_250hz()) {
+    uint32_t elapsed_ticks;
+    if(assemble_scheduler_take_tick(&elapsed_ticks)) {
+        if(entry_tick_250hz(elapsed_ticks)) {
             odom.process();
         }
-        if(entry_tick_100hz()) {
+        if(entry_tick_100hz(elapsed_ticks)) {
             remote_process();
         }
         app_runtime_process();
+        assemble_scheduler_finish_tick();
     }
     app_status_process();
 }
 
 // ! ========================= 私 有 函 数 实 现 ========================= ! //
 
-static inline bool entry_tick_250hz(void) {
-    s_entry_250hz_tick = (uint8_t)((s_entry_250hz_tick + 1u) % 2u);
-    return s_entry_250hz_tick == 0u;
+static inline bool entry_tick_250hz(uint32_t elapsed_ticks) {
+    const uint8_t phase = s_entry_250hz_tick + (uint8_t)(elapsed_ticks % 2u);
+    const bool due = elapsed_ticks >= 2u || phase >= 2u;
+    s_entry_250hz_tick = phase % 2u;
+    return due;
 }
 
-static inline bool entry_tick_100hz(void) {
-    s_entry_100hz_tick = (uint8_t)((s_entry_100hz_tick + 1u) % 5u);
-    return s_entry_100hz_tick == 0u;
+static inline bool entry_tick_100hz(uint32_t elapsed_ticks) {
+    const uint8_t phase = s_entry_100hz_tick + (uint8_t)(elapsed_ticks % 5u);
+    const bool due = elapsed_ticks >= 5u || phase >= 5u;
+    s_entry_100hz_tick = phase % 5u;
+    return due;
 }
 
 #endif

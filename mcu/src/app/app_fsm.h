@@ -14,7 +14,7 @@
 /**
  * @brief 系统级状态机状态
  * @details 语义上分为三类
- * - Operational: Idle, Manual
+ * - Operational: Idle, Manual, Auto
  * - Fault: 可通过 `CLEAR_FAULT` 恢复到 Idle
  * - EStop: 急停锁死态, 不能通过普通手动请求或 `CLEAR_FAULT` 恢复
  */
@@ -23,6 +23,7 @@ typedef enum {
     APP_FSM_STATE_MANUAL,
     APP_FSM_STATE_FAULT,
     APP_FSM_STATE_ESTOP,
+    APP_FSM_STATE_AUTO,
 } AppFsmStateId;
 
 /**
@@ -35,6 +36,7 @@ typedef enum {
     APP_FSM_EVENT_FAULT,
     APP_FSM_EVENT_CLEAR_FAULT,
     APP_FSM_EVENT_ESTOP,
+    APP_FSM_EVENT_SWITCH_TO_AUTO,
 } AppFsmEventId;
 
 /**

@@ -44,8 +44,8 @@ void remote_process(void) {
     s_remote_state.online = true;
     s_remote_state.rc_data = rc_data;
     s_remote_state.stamp_ms = rc_data.last_update_ms;
-    s_remote_state.manual_request = (rc_data.channel[REMOTE_CH_SWD] == REMOTE_SW_LOW &&
-                                     rc_data.channel[REMOTE_CH_SWA] == REMOTE_SW_HIGH);
+    s_remote_state.manual_request = rc_data.channel[REMOTE_CH_SWD] == REMOTE_SW_LOW;
+    s_remote_state.auto_request = rc_data.channel[REMOTE_CH_SWD] == REMOTE_SW_HIGH;
     clear_condition = (rc_data.channel[REMOTE_CH_SWC] == REMOTE_SW_HIGH &&
                        rc_data.channel[REMOTE_CH_VRA] <= REMOTE_VR_LOW_THRESHOLD &&
                        rc_data.channel[REMOTE_CH_VRB] <= REMOTE_VR_LOW_THRESHOLD);
@@ -76,6 +76,10 @@ bool remote_is_online(uint32_t timeout_ms) {
 
 bool remote_is_manual_requested(void) {
     return remote_is_online(REMOTE_TIMEOUT_MS) && s_remote_state.manual_request;
+}
+
+bool remote_is_auto_requested(void) {
+    return remote_is_online(REMOTE_TIMEOUT_MS) && s_remote_state.auto_request;
 }
 
 bool remote_take_clear_reset_event(void) {

@@ -2,7 +2,6 @@
 
 #include "chassis.h"
 #include "imu.h"
-#include "stm32_hal_dwt.h"
 
 #include <math.h>
 #include <stddef.h>
@@ -44,10 +43,12 @@ static OdomConfig s_config = { 0 };
  * @brief 上次 IMU 样本时间戳，单位微秒
  */
 static uint32_t s_last_gyro_timestamp_us = 0u;
+static bool s_gyro_timestamp_seen = false;
 /**
  * @brief 上次 fallback 时间戳，单位微秒
  */
 static uint32_t s_last_fallback_timestamp_us = 0u;
+static bool s_fallback_timestamp_seen = false;
 
 /**
  * @brief 里程计服务接口单例
@@ -135,7 +136,10 @@ OdomStatus odom_init(const OdomConfig* config) {
     s_config = (config != NULL) ? *config : odom_default_config();
     s_last_gyro_timestamp_us = 0u;
     s_last_fallback_timestamp_us = 0u;
-    if(s_config.process_period_s <= 0.0f) {
+    s_gyro_timestamp_seen = false;
+    s_fallback_timestamp_seen = false;
+    if(!isfinite(s_config.process_period_s) || s_config.process_period_s <= 0.0f ||
+       s_config.process_period_s > ODOM_MAX_PROCESS_DT_S) {
         s_config.process_period_s = ODOM_DEFAULT_PROCESS_PERIOD_S;
     }
     if(!isfinite(s_config.yaw_rate_scale) || s_config.yaw_rate_scale <= 0.0f) {
@@ -154,7 +158,7 @@ OdomStatus odom_init(const OdomConfig* config) {
 /**
  * @brief 执行一次里程计服务流程
  *
- * 该函数统一刷新 IMU，读取底盘速度，并更新底盘 + IMU 融合里程；
+ * 该函数统一刷新 IMU，读取底盘速度，并更新底盘 + IMU 融合里程
  * 上层任务不再直接调用 imu.update()
  *
  * @return OdomStatus 状态码
@@ -397,18 +401,24 @@ static float odom_resolve_process_dt_s(const ImuSample* sample) {
     float dt_s = s_config.process_period_s;
 
     if(sample != NULL && sample->gyro_timestamp_us != 0u) {
-        if(s_last_gyro_timestamp_us != 0u) {
+        if(s_gyro_timestamp_seen) {
             dt_s = (float)(sample->gyro_timestamp_us - s_last_gyro_timestamp_us) * 1.0e-6f;
         }
         s_last_gyro_timestamp_us = sample->gyro_timestamp_us;
+        s_gyro_timestamp_seen = true;
+        /* Switching clock domains must not reuse a stale fallback timestamp */
+        s_fallback_timestamp_seen = false;
     }
     else {
-        const uint32_t now_us = dwt_get_us();
+        const uint32_t now_us = s_config.now_us != NULL
+            ? s_config.now_us(s_config.clock_context) : 0u;
 
-        if(s_last_fallback_timestamp_us != 0u && now_us != 0u) {
+        if(s_config.now_us != NULL && s_fallback_timestamp_seen) {
             dt_s = (float)(now_us - s_last_fallback_timestamp_us) * 1.0e-6f;
         }
         s_last_fallback_timestamp_us = now_us;
+        s_fallback_timestamp_seen = s_config.now_us != NULL;
+        s_gyro_timestamp_seen = false;
     }
 
     if(!isfinite(dt_s) || dt_s <= 0.0f || dt_s > ODOM_MAX_PROCESS_DT_S) {
