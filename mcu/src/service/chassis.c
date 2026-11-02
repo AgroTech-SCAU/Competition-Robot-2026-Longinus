@@ -165,6 +165,14 @@ static bool s_preparing = false;
 static bool s_self_check_passed = false;
 static uint8_t s_prepare_steer_index;
 static uint8_t s_prepare_drive_index;
+static struct {
+    bool reference_valid;
+    bool projection_valid;
+    float reference_roll;
+    float reference_pitch;
+    float xx, xy, yx, yy;
+    float determinant;
+} s_imu_tilt;
 /**
  * @brief 对外暴露的底盘只读快照
  *
@@ -261,6 +269,7 @@ const struct ChassisInterface chassis_interface = {
 static ChassisErrorCode chassis_motor_status(BusMotorStatus status, const char* action);
 static BusMotorStatus chassis_drive_command(const float velocity[CHASSIS_MODULE_COUNT]);
 static BusMotorStatus chassis_steer_hold(BusMotorId id);
+static void chassis_transform_imu_tilt(float* vx, float* vy, bool to_body);
 
 
 /**
@@ -505,6 +514,8 @@ ChassisErrorCode chassis_init(const ChassisConfig* config) {
     s_chassis.initialized = false;
     s_output_enabled = false;
     s_preparing = false;
+    s_imu_tilt.reference_valid = false;
+    s_imu_tilt.projection_valid = false;
     s_prepare_steer_index = s_prepare_drive_index = 0u;
     chassis_reset_steer_speed_profiles();
     s_last_steer_missing_mask = 0xFFu;
@@ -553,6 +564,7 @@ ChassisErrorCode chassis_set_velocity(float vx, float vy, float wz) {
        (s_preparing && (vx != 0.0f || vy != 0.0f || wz != 0.0f))) {
         return ch.INVALID_PARAM;
     }
+    chassis_transform_imu_tilt(&vx, &vy, true);
     s_chassis.brake_requested = false;
     s_chassis.brake_latched = false;
     wz_for_ik = wz - chassis_calc_yaw_bias_ext(vx, vy);
@@ -1107,6 +1119,61 @@ static void chassis_internal_to_external_twist(float vx_int, float vy_int, float
         *wz_ext = wz_int;
 }
 
+void chassis_update_imu_tilt(float roll, float pitch) {
+    if(!isfinite(roll) || !isfinite(pitch)) {
+        s_imu_tilt.projection_valid = false;
+        return;
+    }
+    if(!s_imu_tilt.reference_valid) {
+        s_imu_tilt.reference_roll = roll;
+        s_imu_tilt.reference_pitch = pitch;
+        s_imu_tilt.reference_valid = true;
+        log_info("IMU TILT ref: r=%.3f p=%.3f rad g=%.2f/%.2f", (double)roll, (double)pitch,
+                 (double)CHASSIS_IMU_TILT_GAIN_X, (double)CHASSIS_IMU_TILT_GAIN_Y);
+    }
+
+    /* XY block of R0^T * R, with R = Ry(pitch) * Rx(roll).
+       Yaw remains owned by the existing heading control and odometry. */
+    const float cp = cosf(pitch - s_imu_tilt.reference_pitch);
+    const float sp = sinf(pitch - s_imu_tilt.reference_pitch);
+    const float cr0 = cosf(s_imu_tilt.reference_roll);
+    const float sr0 = sinf(s_imu_tilt.reference_roll);
+    const float cr = cosf(roll);
+    const float sr = sinf(roll);
+    s_imu_tilt.xx = cp;
+    s_imu_tilt.xy = sp * sr;
+    s_imu_tilt.yx = -sr0 * sp;
+    s_imu_tilt.yy = cr0 * cr + sr0 * cp * sr;
+    s_imu_tilt.determinant = s_imu_tilt.xx * s_imu_tilt.yy - s_imu_tilt.xy * s_imu_tilt.yx;
+    /* Numerical singularity guard, not a control gain or a tilt tuning limit. */
+    s_imu_tilt.projection_valid = isfinite(s_imu_tilt.determinant) && s_imu_tilt.determinant > 1e-6f;
+}
+
+static void chassis_transform_imu_tilt(float* vx, float* vy, bool to_body) {
+    if(!s_imu_tilt.projection_valid || (*vx == 0.0f && *vy == 0.0f)) return;
+    float x;
+    float y;
+    if(to_body) {
+        if(!isfinite(CHASSIS_IMU_TILT_GAIN_X) || CHASSIS_IMU_TILT_GAIN_X < 0.0f ||
+           !isfinite(CHASSIS_IMU_TILT_GAIN_Y) || CHASSIS_IMU_TILT_GAIN_Y < 0.0f) return;
+        /* Inverse projection: requested reference-plane speed to wheel plane. */
+        x = (s_imu_tilt.yy * *vx - s_imu_tilt.xy * *vy) / s_imu_tilt.determinant;
+        y = (-s_imu_tilt.yx * *vx + s_imu_tilt.xx * *vy) / s_imu_tilt.determinant;
+        /* Amplify only the correction, never the original translation command. */
+        x = *vx + CHASSIS_IMU_TILT_GAIN_X * (x - *vx);
+        y = *vy + CHASSIS_IMU_TILT_GAIN_Y * (y - *vy);
+    }
+    else {
+        /* Forward projection: measured wheel-plane speed to reference plane. */
+        x = s_imu_tilt.xx * *vx + s_imu_tilt.xy * *vy;
+        y = s_imu_tilt.yx * *vx + s_imu_tilt.yy * *vy;
+    }
+    if(isfinite(x) && isfinite(y)) {
+        *vx = x;
+        *vy = y;
+    }
+}
+
 static float chassis_calc_yaw_bias_ext(float vx_ext, float vy_ext) {
     const ChassisYawBiasConfig* bias = &s_chassis.config.yaw_bias;
 
@@ -1135,9 +1202,10 @@ static void chassis_sync_view(void) {
         &vy_ext,
         &wz_fk_raw_ext);
 
+    s_chassis_view.kine.state.cur_wz = wz_fk_raw_ext + chassis_calc_yaw_bias_ext(vx_ext, vy_ext);
+    chassis_transform_imu_tilt(&vx_ext, &vy_ext, false);
     s_chassis_view.kine.state.cur_vx = vx_ext;
     s_chassis_view.kine.state.cur_vy = vy_ext;
-    s_chassis_view.kine.state.cur_wz = wz_fk_raw_ext + chassis_calc_yaw_bias_ext(vx_ext, vy_ext);
 }
 
 static float chassis_wrap_pi(float angle) {

@@ -191,6 +191,13 @@ OdomStatus odom_process(void) {
     imu_angle = imu.get_angle();
     (void)imu_get_sample(&imu_raw_sample);
     process_dt_s = odom_resolve_process_dt_s(&imu_raw_sample);
+    if((imu_raw_sample.flags & (IMU_SAMPLE_ACC_VALID | IMU_SAMPLE_GYRO_VALID)) ==
+       (IMU_SAMPLE_ACC_VALID | IMU_SAMPLE_GYRO_VALID)) {
+        chassis_update_imu_tilt(imu_angle.roll, imu_angle.pitch);
+    }
+    else {
+        chassis_update_imu_tilt(NAN, NAN);
+    }
 
     s_odom.acc = odom_acc_to_vec3(acc);
     s_odom.gyro = odom_gyro_to_vec3(gyro);

@@ -13,6 +13,11 @@
  */
 #define chassis chassis_interface
 
+/* Open-loop tilt correction gains: 0 = off, 1 = geometric, 2 = double increment.
+ * Apply to command VX/VY only; feedback keeps the physical projection. */
+#define CHASSIS_IMU_TILT_GAIN_X -50.0f
+#define CHASSIS_IMU_TILT_GAIN_Y 20.0f
+
 /**
  * @brief 底盘服务状态码表
  * @param OK 操作成功
@@ -238,6 +243,12 @@ ChassisErrorCode chassis_init(const ChassisConfig* config);
  * @return ChassisErrorCode 状态码
  */
 ChassisErrorCode chassis_set_velocity(float vx, float vy, float wz);
+
+/**
+ * @brief 更新 IMU 倾斜投影，首次有效姿态作为启动参考，角度单位 rad
+ * @details 仅补偿平移速度；非有限姿态暂停补偿，不改变启动参考
+ */
+void chassis_update_imu_tilt(float roll, float pitch);
 
 /**
  * @brief 设置是否启用先转向到位再驱动模式
