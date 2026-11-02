@@ -9,8 +9,8 @@
 #define APP_ODOM_TEST_AXIS APP_ODOM_TEST_AXIS_VX
 
 /* X-axis test: distance > 0 (m); speed > 0 forward, speed < 0 backward (m/s). */
-#define APP_ODOM_TEST_DISTANCE_M 0.72f  //进场vx=0.32f
-#define APP_ODOM_TEST_SPEED_MPS 0.50f
+#define APP_ODOM_TEST_DISTANCE_M 1.0f  //进场vx=0.32f，正常循环不算退场0.72正向，最后返回4.35
+#define APP_ODOM_TEST_SPEED_MPS -0.3f
 
 /* Y-axis test: distance > 0 (m); speed > 0 leftward, speed < 0 rightward (m/s). */
 #define APP_ODOM_TEST_VY_DISTANCE_M 2.65f

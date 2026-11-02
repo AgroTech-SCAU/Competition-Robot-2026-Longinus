@@ -1154,7 +1154,7 @@ static void chassis_transform_imu_tilt(float* vx, float* vy, bool to_body) {
     float x;
     float y;
     if(to_body) {
-        if(!isfinite(CHASSIS_IMU_TILT_GAIN_X) || CHASSIS_IMU_TILT_GAIN_X < 0.0f ||
+        if(!isfinite(CHASSIS_IMU_TILT_GAIN_X) ||
            !isfinite(CHASSIS_IMU_TILT_GAIN_Y) || CHASSIS_IMU_TILT_GAIN_Y < 0.0f) return;
         /* Inverse projection: requested reference-plane speed to wheel plane. */
         x = (s_imu_tilt.yy * *vx - s_imu_tilt.xy * *vy) / s_imu_tilt.determinant;
