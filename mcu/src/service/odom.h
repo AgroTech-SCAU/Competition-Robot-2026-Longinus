@@ -69,6 +69,9 @@ typedef struct {
     bool imu_ready;           /**< true 表示最近一次 IMU 更新成功 */
     bool fusion_ready;        /**< true 表示最近一次融合更新成功 */
     bool initialized;         /**< true 表示服务已初始化 */
+    bool opticalflow_ready;   /**< 光流与高度仍有效；不表示每个 250Hz 周期都有新帧 */
+    uint32_t opticalflow_updates; /**< 实际进入滤波器的光流帧数 */
+    uint32_t opticalflow_rejects; /**< 被融合残差门限拒绝的帧数 */
 } Odom;
 
 /**

@@ -2,6 +2,8 @@
 
 static void (*uart5_rx_complete_callback)(void) = NULL;
 static void (*uart5_error_callback)(void) = NULL;
+static void (*uart7_rx_complete_callback)(void) = NULL;
+static void (*uart7_error_callback)(void) = NULL;
 static volatile UartRxDiagnostics s_uart5_rx_diagnostics;
 
 bool uart1_write_blocking(const char* data, uint32_t len) {
@@ -32,11 +34,17 @@ void uart_register_rx_complete_callback(UART_HandleTypeDef* huart, void (*callba
     if(huart == &huart5) {
         uart5_rx_complete_callback = callback;
     }
+    else if(huart == &huart7) {
+        uart7_rx_complete_callback = callback;
+    }
 }
 
 void uart_register_error_callback(UART_HandleTypeDef* huart, void (*callback)(void)) {
     if(huart == &huart5) {
         uart5_error_callback = callback;
+    }
+    else if(huart == &huart7) {
+        uart7_error_callback = callback;
     }
 }
 
@@ -46,6 +54,9 @@ void HAL_UART_RxCpltCallback(UART_HandleTypeDef* huart) {
         s_uart5_rx_diagnostics.last_rx_ms = HAL_GetTick();
         if(uart5_rx_complete_callback != NULL) uart5_rx_complete_callback();
     }
+    else if(huart == &huart7) {
+        if(uart7_rx_complete_callback != NULL) uart7_rx_complete_callback();
+    }
 }
 
 void HAL_UART_ErrorCallback(UART_HandleTypeDef* huart) {
@@ -53,6 +64,9 @@ void HAL_UART_ErrorCallback(UART_HandleTypeDef* huart) {
         ++s_uart5_rx_diagnostics.error_interrupts;
         s_uart5_rx_diagnostics.last_error = huart->ErrorCode;
         if(uart5_error_callback != NULL) uart5_error_callback();
+    }
+    else if(huart == &huart7) {
+        if(uart7_error_callback != NULL) uart7_error_callback();
     }
 }
 
