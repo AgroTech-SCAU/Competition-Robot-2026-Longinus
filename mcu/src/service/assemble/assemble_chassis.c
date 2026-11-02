@@ -120,7 +120,7 @@ SystemStatus assemble_chassis(void) {
         .model = { .length = 0.129f, .width = 0.129f, .wheel_radius = 0.035276f, .max_wheel_linear_speed = 2.0f },
         .wheel_drive_ratio = 1.0f,
         .steer_target_mode = CHASSIS_STEER_TARGET_ABS_NEAREST,
-        .yaw_bias = { .enabled = true, .k_vx = -0.05601101f, .k_vy = 0.06f, .v_deadband = 0.01f },
+        .yaw_bias = { .enabled = true, .k_vx = -0.05601101f, .k_vy = 0.074f, .v_deadband = 0.01f },
     };
     BusMotorStatus status;
     log_info("CHASSIS assemble begin");
