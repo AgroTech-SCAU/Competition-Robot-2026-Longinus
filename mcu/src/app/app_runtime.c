@@ -5,6 +5,7 @@
 
 #include "app_runtime.h"
 #include "app_control.h"
+#include "app_odom_test.h"
 #include "chassis.h"
 #include "delay.h"
 #include "log.h"
@@ -36,6 +37,7 @@ void app_runtime_init(void) {
     s_stop_retry_pending = false;
     s_stop_last_attempt_ms = 0u;
     s_stop_attempted_this_cycle = false;
+    app_odom_test_reset();
     app_control_init();
     app_fsm_init();
 }
@@ -177,8 +179,7 @@ void app_runtime_process(void) {
         control_result = app_control_apply_manual_chassis();
     }
     else {
-        /* Autonomous tasks own chassis service targets after zero-speed startup */
-        control_result = APP_CONTROL_RESULT_OK;
+        control_result = app_odom_test_process();
     }
 
     if(control_result != APP_CONTROL_RESULT_OK && control_result != APP_CONTROL_RESULT_SKIPPED) {
@@ -230,6 +231,7 @@ static bool app_runtime_sticks_centered(void) {
 static void app_runtime_stop(bool force) {
     ChassisErrorCode status;
 
+    app_odom_test_reset();
     s_motor_starting = false;
     if(s_stop_attempted_this_cycle) return;
     if(!force && s_stop_requested &&

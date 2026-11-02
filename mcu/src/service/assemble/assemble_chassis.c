@@ -120,7 +120,7 @@ SystemStatus assemble_chassis(void) {
         .model = { .length = 0.129f, .width = 0.129f, .wheel_radius = 0.035276f, .max_wheel_linear_speed = 2.0f },
         .wheel_drive_ratio = 1.0f,
         .steer_target_mode = CHASSIS_STEER_TARGET_ABS_NEAREST,
-        .yaw_bias = { .enabled = true, .k_vx = -0.049f, .k_vy = 0.055f, .v_deadband = 0.01f },
+        .yaw_bias = { .enabled = true, .k_vx = -0.05601101f, .k_vy = 0.06f, .v_deadband = 0.01f },
     };
     BusMotorStatus status;
     log_info("CHASSIS assemble begin");
@@ -232,7 +232,8 @@ static bool chassis_queue_pop(ChassisRxQueue* queue, ChassisRxFrame* frame) {
 }
 static BusMotorStatus chassis_receive_feedback(void) {
     ChassisRxFrame frame;
-    if(s_steer_rx.overflow || s_drive_rx.overflow) s_receive_error = MOTOR_STATUS_PORT_ERROR;
+    /* Drive RX overflow is diagnostic only; feedback freshness is still checked. */
+    if(s_steer_rx.overflow) s_receive_error = MOTOR_STATUS_PORT_ERROR;
     for(uint8_t bus = 0u; bus < 2u; ++bus) {
         ChassisRxQueue* queue = bus == 0u ? &s_steer_rx : &s_drive_rx;
         while(chassis_queue_pop(queue, &frame)) {
@@ -268,7 +269,7 @@ static BusMotorStatus chassis_motor_update(void) {
 }
 static BusMotorStatus chassis_disable_drive_motors(void) { return dji_motor_bus_disable_all(&s_drive_bus); }
 static bool chassis_feedback_is_healthy(void) {
-    if(s_receive_error != MOTOR_STATUS_OK || s_steer_rx.overflow || s_drive_rx.overflow)
+    if(s_receive_error != MOTOR_STATUS_OK || s_steer_rx.overflow)
         return false;
     for(uint8_t slot = 0u; slot < CHASSIS_MOTOR_COUNT; ++slot) {
         if(!s_feedback_seen[slot] ||
@@ -449,9 +450,10 @@ void assemble_chassis_log_diagnostics(void) {
     if(can_get_diagnostics(&hfdcan1, &steer) != STM32_HAL_CAN_OK ||
        can_get_diagnostics(&hfdcan2, &drive) != STM32_HAL_CAN_OK)
         return;
-    log_info("CAN RX: 1=%lu id=%lx; 2=%lu id=%lx",
+    log_info("CAN RX: 1=%lu id=%lx; 2=%lu id=%lx drive_ovf=%u(ignored)",
              (unsigned long)steer.received_frames, (unsigned long)steer.last_rx_id,
-             (unsigned long)drive.received_frames, (unsigned long)drive.last_rx_id);
+             (unsigned long)drive.received_frames, (unsigned long)drive.last_rx_id,
+             s_drive_rx.overflow ? 1u : 0u);
     if(steer.tx_failure_count == 0u && drive.tx_failure_count == 0u &&
        steer.last_error_code == 0u && drive.last_error_code == 0u &&
        !steer.bus_off && !drive.bus_off)
