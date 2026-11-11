@@ -15,8 +15,8 @@
 
 /* Open-loop tilt correction gains: 0 = off, 1 = geometric, 2 = double increment.
  * Apply to command VX/VY only; feedback keeps the physical projection. */
-#define CHASSIS_IMU_TILT_GAIN_X -3.0f
-#define CHASSIS_IMU_TILT_GAIN_Y 10.0f
+#define CHASSIS_IMU_TILT_GAIN_X 0.0f
+#define CHASSIS_IMU_TILT_GAIN_Y 0.0f
 
 /**
  * @brief 底盘服务状态码表

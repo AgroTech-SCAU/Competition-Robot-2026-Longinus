@@ -2,7 +2,6 @@
 #define _chassis_imu_odom_h_
 
 #include <stdbool.h>
-#include <stdint.h>
 
 #include "kalman.h"
 #include "matrix.h"
@@ -76,16 +75,6 @@ typedef struct {
     Vector3 gyro; /**< 三轴角速度，单位 rad/s */
 } ChassisImuOdomImu;
 
-/** Optical-flow velocity at the sensor position, expressed in body axes. */
-typedef struct {
-    float vx; /**< m/s, body +x forward */
-    float vy; /**< m/s, body +y left */
-    float sensor_x_m;
-    float sensor_y_m;
-    bool valid;   /**< Latest sample and its height are still fresh */
-    bool updated; /**< True only once for each newly received sample */
-} ChassisImuOdomFlow;
-
 /**
  * @brief 融合输出
  */
@@ -110,9 +99,6 @@ typedef struct {
     float chassis_linear_static_threshold;  /**< 静止判定的底盘线速度阈值，单位 m/s */
     float chassis_angular_static_threshold; /**< 静止判定的底盘角速度阈值，单位 rad/s */
     float imu_gyro_static_threshold;        /**< 静止判定的 IMU z 轴角速度阈值，单位 rad/s */
-    float flow_velocity_noise;              /**< 光流速度观测方差 (m/s)^2 */
-    float flow_velocity_gate;               /**< 光流速度残差门限 m/s；<=0 关闭 */
-    float flow_static_threshold;            /**< 光流否决错误静止判定的速度阈值 m/s */
 } ChassisImuOdomConfig;
 
 /**
@@ -123,8 +109,6 @@ typedef struct {
     ChassisImuOdomConfig config; /**< 当前融合参数 */
     ChassisImuOdomOutput output; /**< 最近一次融合输出 */
     bool initialized; /**< true 表示实例已初始化 */
-    uint32_t flow_updates; /**< Accepted optical-flow frames, not 250Hz cycles */
-    uint32_t flow_rejects;
 } ChassisImuOdom;
 
 /**
@@ -151,8 +135,6 @@ extern const struct ChassisImuOdomInterface {
      * @return ChassisImuOdomErrorCode 状态码
      */
     ChassisImuOdomErrorCode (*update)(ChassisImuOdom* odom, ChassisImuOdomChassis chassis, ChassisImuOdomImu imu, float dt);
-    ChassisImuOdomErrorCode (*update_with_flow)(ChassisImuOdom* odom, ChassisImuOdomChassis chassis,
-                                              ChassisImuOdomImu imu, const ChassisImuOdomFlow* flow, float dt);
     /**
      * @brief 获取当前三轴姿态角
      * @param odom 融合实例
@@ -208,9 +190,6 @@ ChassisImuOdomErrorCode chassis_imu_odom_init(ChassisImuOdom* odom, const Chassi
  * @return ChassisImuOdomErrorCode 状态码
  */
 ChassisImuOdomErrorCode chassis_imu_odom_update(ChassisImuOdom* odom, ChassisImuOdomChassis chassis, ChassisImuOdomImu imu, float dt);
-/** Optional independent flow observation; NULL preserves the original wheel + IMU path. */
-ChassisImuOdomErrorCode chassis_imu_odom_update_with_flow(ChassisImuOdom* odom, ChassisImuOdomChassis chassis,
-                                                      ChassisImuOdomImu imu, const ChassisImuOdomFlow* flow, float dt);
 /**
  * @brief 获取当前三轴姿态角
  * @param odom 融合实例

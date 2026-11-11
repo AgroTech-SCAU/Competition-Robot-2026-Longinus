@@ -1,4 +1,4 @@
-param([string]$Compiler = '', [string]$OutputDirectory = 'build/OpticalFlow')
+param([string]$Compiler = '', [string]$OutputDirectory = 'build/Firmware')
 $ErrorActionPreference = 'Stop'
 $projectRoot = Split-Path -Parent $PSScriptRoot
 $mcuRoot = Join-Path $projectRoot 'mcu'

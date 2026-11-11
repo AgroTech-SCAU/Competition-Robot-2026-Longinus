@@ -17,7 +17,6 @@ bool uart_get_rx_diagnostics(UART_HandleTypeDef* huart, UartRxDiagnostics* out);
 
 extern UART_HandleTypeDef huart1;
 extern UART_HandleTypeDef huart5;
-extern UART_HandleTypeDef huart7;
 
 bool uart1_write_blocking(const char* data, uint32_t len);
 bool uart_receive_it(UART_HandleTypeDef* huart, uint8_t* data, uint16_t len);

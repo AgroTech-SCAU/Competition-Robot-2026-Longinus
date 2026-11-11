@@ -24,6 +24,7 @@ typedef struct {
 
 SystemStatus assemble_delay(void);
 SystemStatus assemble_log(void);
+void assemble_log_tuning(float remaining_m);
 SystemStatus assemble_rgb(void);
 SystemStatus assemble_imu(void);
 SystemStatus assemble_chassis(void);

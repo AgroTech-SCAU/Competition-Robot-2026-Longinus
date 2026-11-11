@@ -2,7 +2,6 @@
 
 #include "chassis.h"
 #include "imu.h"
-#include "opticalflow.h"
 
 #include <math.h>
 #include <stddef.h>
@@ -110,15 +109,12 @@ OdomConfig odom_default_config(void) {
             .velocity_process_noise = 0.1f,
             .chassis_velocity_noise = 0.04f,
             .imu_angle_noise = 0.08f,
-            .imu_gyro_noise = 0.03f,
+            .imu_gyro_noise = 0.12f, /* Wheel wz has three times the measurement precision. */
             .gravity = 9.80665f,
             .acc_norm_tolerance = 2.0f,
             .chassis_linear_static_threshold = 0.003f,
             .chassis_angular_static_threshold = 0.02f,
             .imu_gyro_static_threshold = 0.01f,
-            .flow_velocity_noise = 0.0025f,
-            .flow_velocity_gate = 2.0f,
-            .flow_static_threshold = 0.02f,
         },
         .yaw_rate_scale = 1.0f,
         .process_period_s = ODOM_DEFAULT_PROCESS_PERIOD_S,
@@ -178,18 +174,13 @@ OdomStatus odom_process(void) {
     ChassisImuOdomImu imu_sample;
     const SteerWheelState* chassis_state;
     float process_dt_s;
-    ChassisImuOdomFlow flow_sample;
-    bool imu_tilt_valid;
 
     if(!s_odom.initialized) {
         return od.NOT_INITIALIZED;
     }
 
-    /* Drain UART even while the IMU is calibrating; all parsing stays in this task. */
-    opticalflow_process();
     if(imu.update() != IMU_STATUS_OK) {
         s_odom.imu_ready = false;
-        s_odom.opticalflow_ready = false;
         return od.NOT_READY;
     }
 
@@ -200,9 +191,8 @@ OdomStatus odom_process(void) {
     imu_angle = imu.get_angle();
     (void)imu_get_sample(&imu_raw_sample);
     process_dt_s = odom_resolve_process_dt_s(&imu_raw_sample);
-    imu_tilt_valid = (imu_raw_sample.flags & (IMU_SAMPLE_ACC_VALID | IMU_SAMPLE_GYRO_VALID)) ==
-                    (IMU_SAMPLE_ACC_VALID | IMU_SAMPLE_GYRO_VALID);
-    if(imu_tilt_valid) {
+    if((imu_raw_sample.flags & (IMU_SAMPLE_ACC_VALID | IMU_SAMPLE_GYRO_VALID)) ==
+       (IMU_SAMPLE_ACC_VALID | IMU_SAMPLE_GYRO_VALID)) {
         chassis_update_imu_tilt(imu_angle.roll, imu_angle.pitch);
     }
     else {
@@ -227,11 +217,7 @@ OdomStatus odom_process(void) {
     imu_sample.acc = s_odom.acc;
     imu_sample.gyro = s_odom.gyro_corrected;
     imu_sample.gyro.z *= s_config.yaw_rate_scale;
-    flow_sample = opticalflow_take_sample(imu_tilt_valid ? imu_angle.roll : NAN,
-                                         imu_tilt_valid ? imu_angle.pitch : NAN);
-    s_odom.opticalflow_ready = flow_sample.valid;
-    if(chassis_imu_odom.update_with_flow(&s_fusion, chassis_velocity, imu_sample,
-                                       &flow_sample, process_dt_s) != chassis_imu_odom.OK) {
+    if(chassis_imu_odom.update(&s_fusion, chassis_velocity, imu_sample, process_dt_s) != chassis_imu_odom.OK) {
         s_odom.fusion_ready = false;
         return od.FUSION_FAILED;
     }
@@ -241,8 +227,6 @@ OdomStatus odom_process(void) {
     s_odom.velocity.x = s_fusion.output.velocity.vx;
     s_odom.velocity.y = s_fusion.output.velocity.vy;
     s_odom.velocity.z = s_fusion.output.velocity.wz;
-    s_odom.opticalflow_updates = s_fusion.flow_updates;
-    s_odom.opticalflow_rejects = s_fusion.flow_rejects;
     s_odom.fusion_ready = true;
 
     return od.OK;

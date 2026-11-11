@@ -1,12 +1,38 @@
 #include "assemble.h"
 
+#include "chassis.h"
+#include "delay.h"
 #include "log.h"
+#include "odom.h"
 #include "stm32_hal_uart.h"
+
+#include <string.h>
 
 // ! ========================= 变 量 声 明 ========================= ! //
 
+static bool s_plot_requested;
+static uint8_t s_plot_tx[LOG_BUFFER_SIZE];
+
+/* Both callers are in the main loop. The UART IRQ only drains the plot buffer. */
+static bool log_uart_write(const char* data, uint32_t len) {
+    if(s_plot_requested) {
+        if(huart1.gState != HAL_UART_STATE_READY || len > sizeof(s_plot_tx)) {
+            return false;
+        }
+        memcpy(s_plot_tx, data, len);
+        return HAL_UART_Transmit_IT(&huart1, s_plot_tx, (uint16_t)len) == HAL_OK;
+    }
+
+    /* Preserve the existing text log path and give it priority over a plot frame. */
+    if(huart1.gState == HAL_UART_STATE_BUSY_TX) {
+        if(HAL_UART_AbortTransmit(&huart1) != HAL_OK) return false;
+        (void)uart1_write_blocking("\r\n", 2u);
+    }
+    return uart1_write_blocking(data, len);
+}
+
 static const LogPortOps log_ops = {
-    .write = uart1_write_blocking,
+    .write = log_uart_write,
 };
 
 // ! ========================= 接 口 函 数 实 现 ========================= ! //
@@ -24,4 +50,30 @@ SystemStatus assemble_log(void) {
     }
 
     return SYSTEM_STATUS_OK;
+}
+
+void assemble_log_tuning(float rem) {
+    if(!odom.is_ready()) return;
+
+    const Odom* estimate = odom.get_state();
+    const SteerWheelState* wheel = chassis.get_state();
+    const SteerWheelControl* target = chassis.get_control();
+    const bool active = chassis.is_ready();
+    const ms_t ms = delay_now_ms();
+    const float x = estimate->odom.x;
+    const float y = estimate->odom.y;
+    const float yaw = estimate->angle.z;
+    const float vx_cmd = active ? target->vx : 0.0f;
+    const float vy_cmd = active ? target->vy : 0.0f;
+    const float vx_fk = wheel->cur_vx;
+    const float vy_fk = wheel->cur_vy;
+    const float wz_fk = wheel->cur_wz;
+    const float gz = estimate->gyro_corrected.z;
+    const float vx = estimate->velocity.x;
+    const float vy = estimate->velocity.y;
+    const float wz = estimate->velocity.z;
+
+    s_plot_requested = true;
+    (void)log_vofa(ms, x, y, yaw, vx_cmd, vy_cmd, vx_fk, vy_fk, wz_fk, gz, vx, vy, wz, rem, active);
+    s_plot_requested = false;
 }

@@ -5,6 +5,7 @@
 
 #include "app_status.h"
 #include "app_fsm.h"
+#include "app_odom_test.h"
 #include "app_runtime.h"
 #include "assemble/assemble.h"
 #include "chassis.h"
@@ -24,6 +25,7 @@ typedef enum {
 } AppLedState;
 
 static ms_t s_log_timer = 0u;
+static ms_t s_tuning_log_timer = 0u;
 static ms_t s_heartbeat_timer = 0u;
 static AppLedState s_led_state = APP_LED_STATE_NOT_READY;
 
@@ -31,6 +33,7 @@ static void app_status_update_led(void);
 
 void app_status_init(void) {
     s_log_timer = 0u;
+    s_tuning_log_timer = 0u;
     s_heartbeat_timer = 0u;
     s_led_state = APP_LED_STATE_NOT_READY;
 }
@@ -51,6 +54,10 @@ void app_status_process(void) {
         assemble_chassis_log_diagnostics();
         assemble_remote_log_diagnostics();
         assemble_scheduler_log_diagnostics();
+    }
+    if(delay_nb_ms(&s_tuning_log_timer, 100u)) {
+        const bool auto_active = app_runtime_get_state() == APP_FSM_STATE_AUTO && chassis.is_ready();
+        assemble_log_tuning(auto_active ? app_odom_test_remaining_m() : 0.0f);
     }
 }
 

@@ -24,9 +24,9 @@
  */
 #define CHASSIS_IMU_ODOM_2PI (2.0f * CHASSIS_IMU_ODOM_PI)
 /**
- * @brief 观测：wheel vx/vy/wz、roll/pitch、gyro_z、可选 flow vx/vy
+ * @brief 融合模型观测维度：vx、vy、wz、roll、pitch、gyro_z
  */
-#define CHASSIS_IMU_ODOM_MEAS_DIM 8u
+#define CHASSIS_IMU_ODOM_MEAS_DIM 6u
 
 /**
  * @brief 底盘 + IMU 里程融合接口单例
@@ -36,7 +36,6 @@ const struct ChassisImuOdomInterface chassis_imu_odom_interface = {
     { CHASSIS_IMU_ODOM_STATUS_TABLE },
     .init = chassis_imu_odom_init,
     .update = chassis_imu_odom_update,
-    .update_with_flow = chassis_imu_odom_update_with_flow,
     .get_angle = chassis_imu_odom_get_angle,
     .get_odom = chassis_imu_odom_get_odom,
     .get_output = chassis_imu_odom_get_output,
@@ -107,15 +106,12 @@ ChassisImuOdomErrorCode chassis_imu_odom_init(ChassisImuOdom* odom, const Chassi
     use_config.velocity_process_noise = chassis_imu_odom_noise(use_config.velocity_process_noise, 0.1f);
     use_config.chassis_velocity_noise = chassis_imu_odom_noise(use_config.chassis_velocity_noise, 0.04f);
     use_config.imu_angle_noise = chassis_imu_odom_noise(use_config.imu_angle_noise, 0.08f);
-    use_config.imu_gyro_noise = chassis_imu_odom_noise(use_config.imu_gyro_noise, 0.03f);
+    use_config.imu_gyro_noise = chassis_imu_odom_noise(use_config.imu_gyro_noise, 0.12f);
     use_config.gravity = chassis_imu_odom_noise(use_config.gravity, 9.80665f);
     use_config.acc_norm_tolerance = chassis_imu_odom_noise(use_config.acc_norm_tolerance, 2.0f);
     use_config.chassis_linear_static_threshold = chassis_imu_odom_noise(use_config.chassis_linear_static_threshold, 0.003f);
     use_config.chassis_angular_static_threshold = chassis_imu_odom_noise(use_config.chassis_angular_static_threshold, 0.02f);
     use_config.imu_gyro_static_threshold = chassis_imu_odom_noise(use_config.imu_gyro_static_threshold, 0.01f);
-    use_config.flow_velocity_noise = chassis_imu_odom_noise(use_config.flow_velocity_noise, 0.0025f);
-    use_config.flow_static_threshold = chassis_imu_odom_noise(use_config.flow_static_threshold, 0.02f);
-    if(!isfinite(use_config.flow_velocity_gate)) use_config.flow_velocity_gate = 2.0f;
 
     status = kalman.filter_init(&odom->filter, CHASSIS_IMU_ODOM_STATE_DIM, CHASSIS_IMU_ODOM_MEAS_DIM, 0u);
     if(status != kalman.OK) {
@@ -141,11 +137,6 @@ ChassisImuOdomErrorCode chassis_imu_odom_init(ChassisImuOdom* odom, const Chassi
  * @return ChassisImuOdomErrorCode 状态码
  */
 ChassisImuOdomErrorCode chassis_imu_odom_update(ChassisImuOdom* odom, ChassisImuOdomChassis chassis, ChassisImuOdomImu imu, float dt) {
-    return chassis_imu_odom_update_with_flow(odom, chassis, imu, NULL, dt);
-}
-
-ChassisImuOdomErrorCode chassis_imu_odom_update_with_flow(ChassisImuOdom* odom, ChassisImuOdomChassis chassis,
-                                                      ChassisImuOdomImu imu, const ChassisImuOdomFlow* flow, float dt) {
     KalmanFilter* filter;
     Vector3 acc_angle;
     bool acc_trusted = false;
@@ -155,8 +146,6 @@ ChassisImuOdomErrorCode chassis_imu_odom_update_with_flow(ChassisImuOdom* odom, 
     float sin_yaw;
     uint8_t i;
     bool static_window;
-    bool flow_valid;
-    bool flow_update;
 
     if(odom == NULL) {
         return cio.INVALID_PARAM;
@@ -169,22 +158,7 @@ ChassisImuOdomErrorCode chassis_imu_odom_update_with_flow(ChassisImuOdom* odom, 
     }
 
     filter = &odom->filter;
-    flow_valid = flow != NULL && flow->valid && isfinite(flow->vx) && isfinite(flow->vy) &&
-                 isfinite(flow->sensor_x_m) && isfinite(flow->sensor_y_m);
-    if(flow_valid && odom->flow_updates > 0u && odom->config.flow_velocity_gate > 0.0f) {
-        const float wz = filter->x_data[CHASSIS_IMU_ODOM_STATE_WZ];
-        const float rx = flow->vx - (filter->x_data[CHASSIS_IMU_ODOM_STATE_VX] - wz * flow->sensor_y_m);
-        const float ry = flow->vy - (filter->x_data[CHASSIS_IMU_ODOM_STATE_VY] + wz * flow->sensor_x_m);
-        flow_valid = fabsf(rx) <= odom->config.flow_velocity_gate && fabsf(ry) <= odom->config.flow_velocity_gate;
-    }
-    flow_update = flow_valid && flow->updated;
-    if(flow != NULL && flow->updated && !flow_valid) ++odom->flow_rejects;
     static_window = chassis_imu_odom_is_static(odom, chassis, imu);
-    if(flow_valid) {
-        const float vx = flow->vx + imu.gyro.z * flow->sensor_y_m;
-        const float vy = flow->vy - imu.gyro.z * flow->sensor_x_m;
-        static_window = static_window && hypotf(vx, vy) <= odom->config.flow_static_threshold;
-    }
     if(static_window) {
         chassis.vx = 0.0f;
         chassis.vy = 0.0f;
@@ -243,8 +217,6 @@ ChassisImuOdomErrorCode chassis_imu_odom_update_with_flow(ChassisImuOdom* odom, 
     filter->z_data[3] = acc_trusted ? acc_angle.x : filter->x_data[CHASSIS_IMU_ODOM_STATE_ROLL];
     filter->z_data[4] = acc_trusted ? acc_angle.y : filter->x_data[CHASSIS_IMU_ODOM_STATE_PITCH];
     filter->z_data[5] = imu.gyro.z;
-    filter->z_data[6] = flow_update && !static_window ? flow->vx : 0.0f;
-    filter->z_data[7] = flow_update && !static_window ? flow->vy : 0.0f;
 
     filter->H_data[0 * filter->H.col + CHASSIS_IMU_ODOM_STATE_VX] = 1.0f;
     filter->H_data[1 * filter->H.col + CHASSIS_IMU_ODOM_STATE_VY] = 1.0f;
@@ -252,13 +224,6 @@ ChassisImuOdomErrorCode chassis_imu_odom_update_with_flow(ChassisImuOdom* odom, 
     filter->H_data[3 * filter->H.col + CHASSIS_IMU_ODOM_STATE_ROLL] = 1.0f;
     filter->H_data[4 * filter->H.col + CHASSIS_IMU_ODOM_STATE_PITCH] = 1.0f;
     filter->H_data[5 * filter->H.col + CHASSIS_IMU_ODOM_STATE_WZ] = 1.0f;
-    if(flow_update) {
-        /* v_sensor = v_origin + wz x r; keep wz uncertainty in H. */
-        filter->H_data[6 * filter->H.col + CHASSIS_IMU_ODOM_STATE_VX] = 1.0f;
-        filter->H_data[6 * filter->H.col + CHASSIS_IMU_ODOM_STATE_WZ] = -flow->sensor_y_m;
-        filter->H_data[7 * filter->H.col + CHASSIS_IMU_ODOM_STATE_VY] = 1.0f;
-        filter->H_data[7 * filter->H.col + CHASSIS_IMU_ODOM_STATE_WZ] = flow->sensor_x_m;
-    }
 
     filter->R_data[0 * filter->R.col + 0] = odom->config.chassis_velocity_noise;
     filter->R_data[1 * filter->R.col + 1] = odom->config.chassis_velocity_noise;
@@ -266,16 +231,12 @@ ChassisImuOdomErrorCode chassis_imu_odom_update_with_flow(ChassisImuOdom* odom, 
     filter->R_data[3 * filter->R.col + 3] = acc_trusted ? odom->config.imu_angle_noise : 1000.0f;
     filter->R_data[4 * filter->R.col + 4] = acc_trusted ? odom->config.imu_angle_noise : 1000.0f;
     filter->R_data[5 * filter->R.col + 5] = odom->config.imu_gyro_noise;
-    /* H=0, z=0, R=1 makes absent/reused flow rows exactly neutral. */
-    filter->R_data[6 * filter->R.col + 6] = flow_update ? odom->config.flow_velocity_noise : 1.0f;
-    filter->R_data[7 * filter->R.col + 7] = flow_update ? odom->config.flow_velocity_noise : 1.0f;
 
     status = kalman.filter_update(filter);
     if(status != kalman.OK) {
         return chassis_imu_odom_from_kalman(status);
     }
 
-    if(flow_update) ++odom->flow_updates;
     filter->x_data[CHASSIS_IMU_ODOM_STATE_ROLL] = chassis_imu_odom_wrap_pi(filter->x_data[CHASSIS_IMU_ODOM_STATE_ROLL]);
     filter->x_data[CHASSIS_IMU_ODOM_STATE_PITCH] = chassis_imu_odom_wrap_pi(filter->x_data[CHASSIS_IMU_ODOM_STATE_PITCH]);
     filter->x_data[CHASSIS_IMU_ODOM_STATE_YAW] = chassis_imu_odom_wrap_pi(filter->x_data[CHASSIS_IMU_ODOM_STATE_YAW]);
@@ -460,15 +421,12 @@ static ChassisImuOdomConfig chassis_imu_odom_default_config(void) {
         .velocity_process_noise = 0.1f,
         .chassis_velocity_noise = 0.04f,
         .imu_angle_noise = 0.08f,
-        .imu_gyro_noise = 0.03f,
+        .imu_gyro_noise = 0.12f,
         .gravity = 9.80665f,
         .acc_norm_tolerance = 2.0f,
         .chassis_linear_static_threshold = 0.003f,
         .chassis_angular_static_threshold = 0.02f,
         .imu_gyro_static_threshold = 0.01f,
-        .flow_velocity_noise = 0.0025f,
-        .flow_velocity_gate = 2.0f,
-        .flow_static_threshold = 0.02f,
     };
 
     return config;
