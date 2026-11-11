@@ -14,6 +14,12 @@
 #define CHASSIS_DRIVE_GROUP 1u
 #define CHASSIS_RX_QUEUE_COUNT 64u
 #define CHASSIS_MOTOR_COUNT (2u * CHASSIS_MODULE_COUNT)
+#define CHASSIS_WHEEL_RADIUS_M 0.035276f
+#define CHASSIS_WHEEL_DRIVE_RATIO 1.0f
+#define CHASSIS_DRIVE_MAX_SPEED_RAD_S 60.0f
+/* Kinematic ceiling follows the drive command limit and output-to-wheel ratio. */
+#define CHASSIS_MAX_WHEEL_LINEAR_SPEED_MPS \
+    (CHASSIS_DRIVE_MAX_SPEED_RAD_S * CHASSIS_WHEEL_RADIUS_M / CHASSIS_WHEEL_DRIVE_RATIO)
 
 /* Proven Atlas wire ranges are independent of the POS_VEL speed command */
 static const DmMotorLimitParam s_steer_codec_limits = {
@@ -76,6 +82,8 @@ static BusMotorStatus chassis_motor_update(void);
 static BusMotorStatus chassis_disable_drive_motors(void);
 static bool chassis_feedback_is_valid(void);
 static bool chassis_feedback_is_healthy(void);
+static bool chassis_feedback_sample_time_ms(uint32_t* oldest_ms, uint32_t* sequence);
+static bool chassis_read_drive_positions(double positions[CHASSIS_MODULE_COUNT]);
 static BusMotorStatus chassis_cancel_pending_commands(void);
 static void chassis_reset_transport(void);
 static BusMotorStatus chassis_prepare_steer_motor(BusMotorId id);
@@ -117,10 +125,18 @@ SystemStatus assemble_chassis(void) {
         .drive_sign = { 1, -1, -1, 1 },
         .feedback_is_valid = chassis_feedback_is_valid,
         .feedback_is_healthy = chassis_feedback_is_healthy,
-        .model = { .length = 0.129f, .width = 0.129f, .wheel_radius = 0.035276f, .max_wheel_linear_speed = 2.0f },
-        .wheel_drive_ratio = 1.0f,
+        .now_ms = HAL_GetTick,
+        .feedback_sample_time_ms = chassis_feedback_sample_time_ms,
+        .read_drive_positions = chassis_read_drive_positions,
+        /* Measured front/rear and left/right steering-axis spacing, not half-spans. */
+        .model = { .length = 0.192f, .width = 0.192f, .wheel_radius = CHASSIS_WHEEL_RADIUS_M,
+                   .max_wheel_linear_speed = CHASSIS_MAX_WHEEL_LINEAR_SPEED_MPS },
+        .wheel_drive_ratio = CHASSIS_WHEEL_DRIVE_RATIO,
         .steer_target_mode = CHASSIS_STEER_TARGET_ABS_NEAREST,
-        .yaw_bias = { .enabled = true, .k_vx = -0.096f, .k_vy = 0.058f, .v_deadband = 0.01f },
+        /* Scale former gains (-0.096, 0.058) by 129/192 to preserve the proven
+         * translation correction at each wheel: k_new * arm_new = k_old * arm_old.
+         * FK applies these same gains for the inverse observation correction. */
+        .yaw_bias = { .enabled = true, .k_vx = -0.0645f, .k_vy = 0.03896875f, .v_deadband = 0.01f },
     };
     BusMotorStatus status;
     log_info("CHASSIS assemble begin");
@@ -135,7 +151,7 @@ SystemStatus assemble_chassis(void) {
         const DjiMotorConfig drive_config = {
             .can_id = i + 1u, .model = DJI_MOTOR_MODEL_M2006,
             .feedback_timeout_ms = CHASSIS_FEEDBACK_TIMEOUT_MS,
-            .current_limit_a = 10.0f, .velocity_limit_rad_s = 60.0f,
+            .current_limit_a = 10.0f, .velocity_limit_rad_s = CHASSIS_DRIVE_MAX_SPEED_RAD_S,
             .control_period_s = 0.002f,
             /* Atlas RPM/current gains converted to output rad/s and A */
             .kp = 8.0f * 36.0f * 60.0f / (6.28318530718f * 1000.0f),
@@ -278,6 +294,31 @@ static bool chassis_feedback_is_healthy(void) {
     }
     return true;
 }
+static bool chassis_feedback_sample_time_ms(uint32_t* oldest_ms, uint32_t* sequence) {
+    const uint32_t now_ms = HAL_GetTick();
+    uint32_t oldest_age_ms = 0u;
+    uint32_t combined_sequence = 0u;
+    for(uint8_t slot = 0u; slot < CHASSIS_MOTOR_COUNT; ++slot) {
+        if(!s_feedback_seen[slot]) return false;
+        const uint32_t age_ms = (uint32_t)(now_ms - s_feedback_ms[slot]);
+        if(age_ms > oldest_age_ms) oldest_age_ms = age_ms;
+        combined_sequence += s_feedback_sequence[slot];
+    }
+    *oldest_ms = now_ms - oldest_age_ms;
+    *sequence = combined_sequence;
+    return true;
+}
+static bool chassis_read_drive_positions(double positions[CHASSIS_MODULE_COUNT]) {
+    /* The foreground RX parser owns total_ticks. Preserve its double precision
+     * through M2006's 8192-count rotor and 36:1 reduction to the output shaft. */
+    const double radians_per_tick = 6.28318530717958647692 / (8192.0 * 36.0);
+    for(uint8_t i = 0u; i < CHASSIS_MODULE_COUNT; ++i) {
+        if(!s_drive_instances[i].has_feedback) return false;
+        positions[i] = s_drive_instances[i].total_ticks * radians_per_tick;
+    }
+    return true;
+}
+
 static bool chassis_feedback_is_valid(void) {
     if(s_receive_error != MOTOR_STATUS_OK) return false;
     for(uint8_t role = 0u; role < 2u; ++role) {

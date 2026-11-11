@@ -46,7 +46,8 @@ typedef enum {
  */
 typedef struct {
     ChassisImuOdomConfig fusion; /**< 底盘 + IMU 融合配置 */
-    float yaw_rate_scale;        /**< odom yaw rate scale，无量纲 */
+    float wheel_yaw_rate_scale;  /**< 轮式角速度独立比例，无量纲 */
+    float imu_yaw_rate_scale;    /**< 陀螺角速度独立比例，无量纲 */
     float process_period_s;      /**< odom.process() 调用周期，单位 s */
     uint32_t (*now_us)(void* context); /**< 可选单调微秒时钟；未提供时使用样本时间戳/配置周期 */
     void* clock_context;
@@ -63,9 +64,27 @@ typedef struct {
     Vector3 angle;            /**< 融合后的三轴姿态角，x/y/z 分别为 roll/pitch/yaw，单位 rad */
     Vector3 odom;             /**< 融合后的三轴里程，x/y 单位 m，z 当前为预留高度状态 */
     Vector3 velocity;         /**< 融合后的底盘速度，x/y/z 分别表示 vx/vy/wz */
-    float fusion_gyro_bias_z; /**< 融合估计的 IMU z 轴残余零偏，单位 rad/s */
-    bool static_window;       /**< true 表示当前应用静止零速约束 */
-    bool wheel_wz_rejected;   /**< true 表示当前降低了 wheel wz 观测权重 */
+    Vector3 gyro_bias_effective; /**< 实际从 raw gyro 扣除的总零偏，含温补及静止跟踪 */
+    Vector3 wheel_raw;        /**< 外部坐标下未经经验纠偏/倾斜投影的 FK vx/vy/wz */
+    Vector3 wheel_corrected;  /**< 经验纠偏与倾斜投影后、独立尺度调整前 */
+    Vector3 wheel_fusion;     /**< 实际送入融合的轮速 */
+    float gyro_yaw_fusion;    /**< 实际送入融合的 IMU 机体 z 角速度 */
+    float temperature_c;
+    float process_dt_s;
+    double wheel_yaw_integral_rad; /**< 独立轮速梯形积分，不 wrap、不做静止归零 */
+    double imu_yaw_integral_rad;   /**< 独立 IMU Euler yaw-rate 梯形积分，不 wrap */
+    double yaw_integrated_time_s;  /**< 两路共同有效、实际已积分区间的总时长 */
+    uint32_t yaw_integrated_samples; /**< 已积分区间数；首帧/中断后播种帧不计入 */
+    uint32_t sample_time_us;
+    uint32_t wheel_age_ms;
+    uint32_t wheel_sample_sequence;
+    uint32_t discontinuity_count; /**< 数据中断次数；缺失轨迹不假造积分 */
+    bool wheel_valid;
+    bool acc_valid;
+    bool temperature_valid;
+    bool imu_calibrated;
+    bool timing_valid;
+    bool static_window;       /**< 已通过持续窗口与迟滞确认的静止状态 */
     bool imu_ready;           /**< true 表示最近一次 IMU 更新成功 */
     bool fusion_ready;        /**< true 表示最近一次融合更新成功 */
     bool initialized;         /**< true 表示服务已初始化 */

@@ -90,6 +90,10 @@ bool remote_take_clear_reset_event(void) {
     return true;
 }
 
+bool remote_is_clear_reset_active(void) {
+    return remote_is_online(REMOTE_TIMEOUT_MS) && s_clear_condition_active;
+}
+
 const FsIa10bData* remote_get_raw_data(void) {
     return remote_is_online(REMOTE_TIMEOUT_MS) ? &s_remote_state.rc_data : NULL;
 }

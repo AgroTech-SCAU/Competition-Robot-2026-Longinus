@@ -56,6 +56,9 @@ bool remote_is_auto_requested(void);
 
 bool remote_take_clear_reset_event(void);
 
+/** @brief True while the existing stop/clear combination remains held online. */
+bool remote_is_clear_reset_active(void);
+
 const FsIa10bData* remote_get_raw_data(void);
 
 #endif

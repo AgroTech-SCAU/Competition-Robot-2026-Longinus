@@ -42,7 +42,7 @@ typedef enum {
  * 当前模型用于平面底盘里程计：
  * - X/Y 由底盘速度按 yaw 积分得到
  * - Z 为预留状态，当前没有高度观测或预测输入，因此保持初始化/重置值
- * - roll/pitch 由陀螺积分并用加速度重力方向修正
+ * - roll/pitch 使用上游姿态解算结果，不重复进行重力融合
  * - yaw 由 wz 积分并用底盘/IMU z 轴角速度约束
  */
 typedef enum {
@@ -65,6 +65,9 @@ typedef struct {
     float vx; /**< 底盘 x 方向线速度，单位 m/s */
     float vy; /**< 底盘 y 方向线速度，单位 m/s */
     float wz; /**< 底盘 z 轴角速度，单位 rad/s */
+    bool valid; /**< 输入：反馈有效且未超龄；输出：估计已更新 */
+    bool new_sample; /**< 输入：本次包含未被融合过的轮速样本 */
+    bool stationary_allowed; /**< 输入：控制命令允许进行静止确认；不影响正常轮速融合 */
 } ChassisImuOdomChassis;
 
 /**
@@ -73,6 +76,12 @@ typedef struct {
 typedef struct {
     Vector3 acc;  /**< 三轴加速度，单位 m/s^2 */
     Vector3 gyro; /**< 三轴角速度，单位 rad/s */
+    Vector3 angle; /**< 上游姿态角，x/y 为 roll/pitch；不采用其 yaw */
+    bool gyro_valid; /**< gyro 有效且未超龄 */
+    bool acc_valid; /**< acc 有效且未超龄 */
+    bool angle_valid; /**< 上游 roll/pitch 有效 */
+    bool gyro_new_sample; /**< 本次包含未被融合过的陀螺样本 */
+    bool acc_new_sample; /**< 本次包含未被统计过的加速度样本 */
 } ChassisImuOdomImu;
 
 /**
@@ -82,23 +91,33 @@ typedef struct {
     Vector3 angle; /**< 三轴姿态角，x/y/z 分别为 roll/pitch/yaw，单位 rad */
     Vector3 odom;  /**< 三轴里程，x/y 单位 m；z 当前为预留高度状态 */
     ChassisImuOdomChassis velocity; /**< 融合后的底盘速度估计 */
+    bool stationary; /**< 有效轮速、三轴陀螺及加速度持续满足静止条件 */
 } ChassisImuOdomOutput;
 
 /**
  * @brief 融合滤波器噪声配置
  */
 typedef struct {
-    float pos_process_noise;      /**< 位置过程噪声 */
-    float angle_process_noise;    /**< 姿态角过程噪声 */
-    float velocity_process_noise; /**< 速度过程噪声 */
-    float chassis_velocity_noise; /**< 底盘速度观测噪声 */
-    float imu_angle_noise;        /**< 由加速度估计 roll/pitch 的观测噪声 */
-    float imu_gyro_noise;         /**< IMU z 轴角速度观测噪声 */
+    float position_process_noise_x; /**< x 随机游走方差率，m²/s */
+    float position_process_noise_y; /**< y 随机游走方差率，m²/s */
+    float yaw_process_noise;        /**< yaw 随机游走方差率，rad²/s */
+    float velocity_process_noise_x; /**< vx 随机游走方差率，(m/s)²/s */
+    float velocity_process_noise_y; /**< vy 随机游走方差率，(m/s)²/s */
+    float velocity_process_noise_wz; /**< wz 随机游走方差率，(rad/s)²/s */
+    float chassis_velocity_noise_x; /**< 轮速 vx 观测方差，(m/s)² */
+    float chassis_velocity_noise_y; /**< 轮速 vy 观测方差，(m/s)² */
+    float chassis_velocity_noise_wz; /**< 轮速 wz 观测方差，(rad/s)² */
+    float imu_gyro_noise;         /**< IMU 航向角速度观测方差，(rad/s)² */
     float gravity;                /**< 静止重力加速度参考值，单位 m/s^2 */
-    float acc_norm_tolerance;     /**< 加速度模长可信窗口，超出时不使用加速度修正姿态 */
+    float acc_norm_tolerance;     /**< 静止检测 |acc模长-g| 上限，m/s² */
     float chassis_linear_static_threshold;  /**< 静止判定的底盘线速度阈值，单位 m/s */
     float chassis_angular_static_threshold; /**< 静止判定的底盘角速度阈值，单位 rad/s */
-    float imu_gyro_static_threshold;        /**< 静止判定的 IMU z 轴角速度阈值，单位 rad/s */
+    float imu_gyro_static_threshold;        /**< 瞬时三轴陀螺模长上限，rad/s；容忍静止噪声峰值 */
+    float imu_gyro_mean_static_threshold;   /**< 三轴陀螺低通均值模长上限，rad/s；进入和退出共用 */
+    float imu_gyro_mean_time_constant_s;    /**< 静止判定陀螺均值低通时间常数，s */
+    float stationary_enter_time_s; /**< 连续静止候选时长，s */
+    float stationary_exit_ratio; /**< 瞬时 gyro、轮速和 acc 的退出倍率，>=1；不放宽 gyro 均值门限 */
+    float acc_change_threshold; /**< 静止窗三轴加速度合成 RMS 变化上限，m/s² */
 } ChassisImuOdomConfig;
 
 /**
@@ -108,6 +127,17 @@ typedef struct {
     KalmanFilter filter; /**< 底层通用卡尔曼滤波器 */
     ChassisImuOdomConfig config; /**< 当前融合参数 */
     ChassisImuOdomOutput output; /**< 最近一次融合输出 */
+    Vector3 stationary_acc_mean;
+    float stationary_acc_m2;
+    float stationary_candidate_s;
+    float stationary_acc_variance;
+    float stationary_acc_weight_s;
+    float stationary_acc_elapsed_s;
+    uint32_t stationary_acc_samples;
+    Vector3 stationary_gyro_mean;
+    float stationary_gyro_elapsed_s;
+    bool stationary_gyro_mean_initialized;
+    bool stationary;
     bool initialized; /**< true 表示实例已初始化 */
 } ChassisImuOdom;
 
@@ -173,6 +203,11 @@ extern const struct ChassisImuOdomInterface {
 #undef X
 
 // ! ========================= 接 口 函 数 声 明 ========================= ! //
+
+/** @brief 获取按物理量拆分的默认配置；噪声数值需以实测方差标定 */
+ChassisImuOdomConfig chassis_imu_odom_default_config(void);
+/** @brief 显式数据中断：取消静止确认并重置速度，保留累计位置与航向 */
+void chassis_imu_odom_invalidate(ChassisImuOdom* odom);
 
 /**
  * @brief 初始化融合实例

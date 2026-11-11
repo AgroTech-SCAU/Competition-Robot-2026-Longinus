@@ -90,6 +90,22 @@ typedef struct {
     float v_deadband;
 } ChassisYawBiasConfig;
 
+typedef struct {
+    float vx;
+    float vy;
+    float wz;
+} ChassisVelocity;
+
+/** Wheel observations are independent of motor output and braking commands. */
+typedef struct {
+    ChassisVelocity raw_velocity; /**< Uncorrected wheel-plane forward kinematics */
+    ChassisVelocity velocity;     /**< Yaw bias corrected, reference-plane velocity */
+    uint32_t sample_time_ms;       /**< Oldest contributing motor arrival timestamp */
+    uint32_t sample_sequence;      /**< Advances when any contributing feedback changes */
+    uint32_t age_ms;               /**< Current age of the oldest contributing feedback */
+    bool valid;
+} ChassisObservation;
+
 /**
  * @brief 底盘服务初始化配置
  * @param prepare_steer_motor 转向电机上电准备回调函数
@@ -114,6 +130,10 @@ typedef struct {
     bool (*feedback_is_valid)(void);
     /* Passive transport health and arrival freshness, independent of output */
     bool (*feedback_is_healthy)(void);
+    uint32_t (*now_ms)(void);
+    bool (*feedback_sample_time_ms)(uint32_t* oldest_ms, uint32_t* sequence);
+    /* Cumulative output-shaft radians, native motor signs; no float truncation. */
+    bool (*read_drive_positions)(double positions[CHASSIS_MODULE_COUNT]);
     SteerWheelModel model;
     float wheel_drive_ratio;
     ChassisSteerTargetMode steer_target_mode;
@@ -212,6 +232,8 @@ extern const struct ChassisInterface {
      * @return const SteerWheelState* 当前状态指针
      */
     const SteerWheelState* (*get_state)(void);
+    /** Copy the latest wheel observation, including validity and current age. */
+    bool (*get_observation)(ChassisObservation* observation);
     /**
      * @brief 获取底盘当前控制量只读视图
      * @return const SteerWheelControl* 当前控制量指针
@@ -275,13 +297,16 @@ ChassisErrorCode chassis_stop(void);
  */
 ChassisErrorCode chassis_set_output_enabled(bool enabled);
 
+/** @brief Read the output gate without preparing or commanding motors. */
+bool chassis_is_output_enabled(void);
+
 /** @brief 禁止输出时复位项目接收故障，随后仍需显式手动使能 */
 ChassisErrorCode chassis_clear_motor_fault(void);
 
 /** @brief 处理反馈和驱动超时，不生成运动命令 */
 ChassisErrorCode chassis_poll(void);
 
-/** @brief Only drain feedback; never sends motor commands or retries zero output */
+/** @brief Drain feedback and refresh passive wheel kinematics; never sends commands */
 ChassisErrorCode chassis_poll_feedback(void);
 
 /**
@@ -321,6 +346,9 @@ const Chassis* chassis_get_chassis(void);
  * @return const SteerWheelState* 当前状态指针
  */
 const SteerWheelState* chassis_get_state(void);
+
+/** @brief Copy the latest wheel observation; false still copies diagnostics when non-NULL. */
+bool chassis_get_observation(ChassisObservation* observation);
 
 /**
  * @brief 获取底盘当前控制量只读视图

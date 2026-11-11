@@ -1,6 +1,7 @@
 #include "kalman.h"
 
 #include <stddef.h>
+#include <math.h>
 #include <string.h>
 
 // ! ========================= 变 量 声 明 ========================= ! //
@@ -18,6 +19,7 @@ const struct KalmanInterface kalman_interface = {
     { KALMAN_STATUS_TABLE },
     .filter_init = kalman_filter_init,
     .filter_predict = kalman_filter_predict,
+    .filter_predict_state = kalman_filter_predict_state,
     .filter_update = kalman_filter_update,
     .error_code_to_str = kalman_error_code_to_str
 };
@@ -84,14 +86,8 @@ KalmanErrorCode kalman_filter_init(KalmanFilter* filter, uint8_t state_dim, uint
 KalmanErrorCode kalman_filter_predict(KalmanFilter* filter) {
     float x_pred_data[KALMAN_MAX_STATE_DIM];
     float Bu_data[KALMAN_MAX_STATE_DIM];
-    float FP_data[KALMAN_MAX_STATE_DIM * KALMAN_MAX_STATE_DIM];
-    float Ft_data[KALMAN_MAX_STATE_DIM * KALMAN_MAX_STATE_DIM];
-    float P_pred_data[KALMAN_MAX_STATE_DIM * KALMAN_MAX_STATE_DIM];
     Matrix x_pred;
     Matrix Bu;
-    Matrix FP;
-    Matrix Ft;
-    Matrix P_pred;
 
     if(filter == NULL) {
         return kf.INVALID_PARAM;
@@ -102,27 +98,48 @@ KalmanErrorCode kalman_filter_predict(KalmanFilter* filter) {
 
     (void)matrix(&x_pred, filter->state_dim, 1u, x_pred_data);
     (void)matrix(&Bu, filter->state_dim, 1u, Bu_data);
-    (void)matrix(&FP, filter->state_dim, filter->state_dim, FP_data);
-    (void)matrix(&Ft, filter->state_dim, filter->state_dim, Ft_data);
-    (void)matrix(&P_pred, filter->state_dim, filter->state_dim, P_pred_data);
 
     if(matrix_mul(&filter->F, &filter->x, &x_pred) != MATRIX_SUCCESS) {
         return kf.MATRIX_FAILED;
     }
 
     if(filter->ctrl_dim > 0u) {
-        if(matrix_mul(&filter->B, &filter->u, &Bu) != MATRIX_SUCCESS || matrix_add(&x_pred, &Bu, &filter->x) != MATRIX_SUCCESS) {
+        if(matrix_mul(&filter->B, &filter->u, &Bu) != MATRIX_SUCCESS || matrix_add(&x_pred, &Bu, &x_pred) != MATRIX_SUCCESS) {
             return kf.MATRIX_FAILED;
         }
     }
-    else if(matrix_copy(&x_pred, &filter->x) != MATRIX_SUCCESS) {
+    return kalman_filter_predict_state(filter, x_pred_data);
+}
+
+KalmanErrorCode kalman_filter_predict_state(KalmanFilter* filter, const float* predicted_state) {
+    float FP_data[KALMAN_MAX_STATE_DIM * KALMAN_MAX_STATE_DIM];
+    float Ft_data[KALMAN_MAX_STATE_DIM * KALMAN_MAX_STATE_DIM];
+    float P_pred_data[KALMAN_MAX_STATE_DIM * KALMAN_MAX_STATE_DIM];
+    Matrix FP, Ft, P_pred;
+    if(filter == NULL || predicted_state == NULL) return kf.INVALID_PARAM;
+    if(!filter->initialized) return kf.NOT_INITIALIZE;
+    for(uint8_t i = 0u; i < filter->state_dim; ++i) {
+        if(!isfinite(predicted_state[i])) return kf.INVALID_PARAM;
+    }
+    (void)matrix(&FP, filter->state_dim, filter->state_dim, FP_data);
+    (void)matrix(&Ft, filter->state_dim, filter->state_dim, Ft_data);
+    (void)matrix(&P_pred, filter->state_dim, filter->state_dim, P_pred_data);
+    if(matrix_mul(&filter->F, &filter->P, &FP) != MATRIX_SUCCESS ||
+       matrix_transpose(&filter->F, &Ft) != MATRIX_SUCCESS ||
+       matrix_mul(&FP, &Ft, &P_pred) != MATRIX_SUCCESS ||
+       matrix_add(&P_pred, &filter->Q, &P_pred) != MATRIX_SUCCESS) {
         return kf.MATRIX_FAILED;
     }
-
-    if(matrix_mul(&filter->F, &filter->P, &FP) != MATRIX_SUCCESS || matrix_transpose(&filter->F, &Ft) != MATRIX_SUCCESS || matrix_mul(&FP, &Ft, &P_pred) != MATRIX_SUCCESS || matrix_add(&P_pred, &filter->Q, &filter->P) != MATRIX_SUCCESS) {
-        return kf.MATRIX_FAILED;
+    for(uint8_t i = 0u; i < filter->state_dim; ++i) {
+        for(uint8_t j = i; j < filter->state_dim; ++j) {
+            float value = 0.5f * (P_pred_data[i * filter->state_dim + j] + P_pred_data[j * filter->state_dim + i]);
+            if(!isfinite(value)) return kf.MATRIX_FAILED;
+            P_pred_data[i * filter->state_dim + j] = value;
+            P_pred_data[j * filter->state_dim + i] = value;
+        }
     }
-
+    memcpy(filter->x_data, predicted_state, filter->state_dim * sizeof(float));
+    (void)matrix_copy(&P_pred, &filter->P);
     return kf.OK;
 }
 
@@ -182,10 +199,44 @@ KalmanErrorCode kalman_filter_update(KalmanFilter* filter) {
 
     kalman_matrix_identity(&I);
 
-    if(matrix_mul(&filter->H, &filter->x, &Hx) != MATRIX_SUCCESS || matrix_sub(&filter->z, &Hx, &y) != MATRIX_SUCCESS || matrix_transpose(&filter->H, &Ht) != MATRIX_SUCCESS || matrix_mul(&filter->P, &Ht, &PHt) != MATRIX_SUCCESS || matrix_mul(&filter->H, &filter->P, &HP) != MATRIX_SUCCESS || matrix_mul(&HP, &Ht, &S) != MATRIX_SUCCESS || matrix_add(&S, &filter->R, &S) != MATRIX_SUCCESS || matrix_inverse(&S, &S_inv) != MATRIX_SUCCESS || matrix_mul(&PHt, &S_inv, &K) != MATRIX_SUCCESS || matrix_mul(&K, &y, &Ky) != MATRIX_SUCCESS || matrix_add(&filter->x, &Ky, &filter->x) != MATRIX_SUCCESS || matrix_mul(&K, &filter->H, &KH) != MATRIX_SUCCESS || matrix_sub(&I, &KH, &I_KH) != MATRIX_SUCCESS || matrix_mul(&I_KH, &filter->P, &P_new) != MATRIX_SUCCESS || matrix_copy(&P_new, &filter->P) != MATRIX_SUCCESS) {
+    if(matrix_mul(&filter->H, &filter->x, &Hx) != MATRIX_SUCCESS || matrix_sub(&filter->z, &Hx, &y) != MATRIX_SUCCESS || matrix_transpose(&filter->H, &Ht) != MATRIX_SUCCESS || matrix_mul(&filter->P, &Ht, &PHt) != MATRIX_SUCCESS || matrix_mul(&filter->H, &filter->P, &HP) != MATRIX_SUCCESS || matrix_mul(&HP, &Ht, &S) != MATRIX_SUCCESS || matrix_add(&S, &filter->R, &S) != MATRIX_SUCCESS) {
+        return kf.MATRIX_FAILED;
+    }
+    /* Scale before inversion so the matrix library's pivot threshold is relative
+     * to the innovation covariance, rather than a threshold in sensor units. */
+    float scale = 0.0f;
+    for(uint8_t i = 0u; i < filter->meas_dim; ++i) {
+        float diagonal = S_data[i * filter->meas_dim + i];
+        if(!isfinite(diagonal) || diagonal <= 0.0f) return kf.MATRIX_FAILED;
+        if(diagonal > scale) scale = diagonal;
+    }
+    for(uint16_t i = 0u; i < filter->meas_dim * filter->meas_dim; ++i) S_data[i] /= scale;
+    if(matrix_inverse(&S, &S_inv) != MATRIX_SUCCESS) return kf.MATRIX_FAILED;
+    for(uint16_t i = 0u; i < filter->meas_dim * filter->meas_dim; ++i) S_inv_data[i] /= scale;
+    if(matrix_mul(&PHt, &S_inv, &K) != MATRIX_SUCCESS || matrix_mul(&K, &y, &Ky) != MATRIX_SUCCESS || matrix_add(&filter->x, &Ky, &Ky) != MATRIX_SUCCESS || matrix_mul(&K, &filter->H, &KH) != MATRIX_SUCCESS || matrix_sub(&I, &KH, &I_KH) != MATRIX_SUCCESS) {
         return kf.MATRIX_FAILED;
     }
 
+    /* Joseph form: (I-KH) P (I-KH)^T + K R K^T.
+     * Reuse scratch matrices after their earlier values are no longer needed. */
+    if(matrix_mul(&I_KH, &filter->P, &KH) != MATRIX_SUCCESS ||
+       matrix_transpose(&I_KH, &I) != MATRIX_SUCCESS ||
+       matrix_mul(&KH, &I, &P_new) != MATRIX_SUCCESS ||
+       matrix_mul(&K, &filter->R, &Ht) != MATRIX_SUCCESS ||
+       matrix_transpose(&K, &HP) != MATRIX_SUCCESS ||
+       matrix_mul(&Ht, &HP, &KH) != MATRIX_SUCCESS ||
+       matrix_add(&P_new, &KH, &P_new) != MATRIX_SUCCESS) return kf.MATRIX_FAILED;
+    for(uint8_t i = 0u; i < filter->state_dim; ++i) {
+        if(!isfinite(Ky_data[i])) return kf.MATRIX_FAILED;
+        for(uint8_t j = i; j < filter->state_dim; ++j) {
+            float value = 0.5f * (P_new_data[i * filter->state_dim + j] + P_new_data[j * filter->state_dim + i]);
+            if(!isfinite(value)) return kf.MATRIX_FAILED;
+            P_new_data[i * filter->state_dim + j] = value;
+            P_new_data[j * filter->state_dim + i] = value;
+        }
+    }
+    (void)matrix_copy(&Ky, &filter->x);
+    (void)matrix_copy(&P_new, &filter->P);
     return kf.OK;
 }
 

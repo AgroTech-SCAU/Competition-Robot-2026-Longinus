@@ -17,20 +17,24 @@
 #define APP_RUNTIME_STARTUP_TIMEOUT_MS 3000u
 #define APP_RUNTIME_STOP_RETRY_MS 100u
 
-static bool s_manual_edge_armed = false;
+static bool s_manual_waiting_ready = false;
 static bool s_motor_starting = false;
 static ms_t s_motor_start_since_ms = 0u;
 static bool s_stop_requested = false;
 static bool s_stop_retry_pending = false;
 static ms_t s_stop_last_attempt_ms = 0u;
 static bool s_stop_attempted_this_cycle = false;
+/* Preserve the actual triggering frame; stopping motors makes later wheel
+   feedback unavailable and would otherwise hide the readiness failure. */
+static volatile Odom s_odom_fault_snapshot;
+static volatile bool s_odom_fault_was_starting;
 
 static bool app_runtime_sticks_centered(void);
 static void app_runtime_raise_fault(AppFaultSource source, int32_t code);
 static void app_runtime_stop(bool force);
 
 void app_runtime_init(void) {
-    s_manual_edge_armed = false;
+    s_manual_waiting_ready = false;
     s_motor_starting = false;
     s_motor_start_since_ms = 0u;
     s_stop_requested = false;
@@ -51,14 +55,12 @@ void app_runtime_process(void) {
 
     s_stop_attempted_this_cycle = false;
     if(!online) {
-        s_manual_edge_armed = false;
         if(app_fsm_get_state() == APP_FSM_STATE_MANUAL || app_fsm_get_state() == APP_FSM_STATE_AUTO) {
             app_runtime_raise_fault(APP_FAULT_SOURCE_REMOTE, 1);
             return;
         }
     }
     else if(remote_take_clear_reset_event()) {
-        s_manual_edge_armed = false;
         app_runtime_stop(false);
         if(s_stop_retry_pending) return;
         if(app_fsm_get_state() == APP_FSM_STATE_FAULT) {
@@ -72,8 +74,16 @@ void app_runtime_process(void) {
         app_fsm_process();
         return;
     }
+    else if(remote_is_clear_reset_active()) {
+        /* The existing stop/clear combination holds output disabled until
+           released; its one-shot clear event must not become an auto-restart. */
+        app_runtime_stop(false);
+        if(s_stop_retry_pending) return;
+        (void)app_fsm_post(APP_FSM_EVENT_STOP);
+        app_fsm_process();
+        return;
+    }
     else if(auto_request) {
-        s_manual_edge_armed = true;
         bool stopped_for_switch = false;
         if(app_fsm_get_state() == APP_FSM_STATE_MANUAL) {
             app_runtime_stop(false);
@@ -91,8 +101,6 @@ void app_runtime_process(void) {
         }
     }
     else if(!manual_request) {
-        /* Only a fresh non-manual selection can arm the next manual request */
-        s_manual_edge_armed = true;
         if(app_fsm_get_state() == APP_FSM_STATE_MANUAL || app_fsm_get_state() == APP_FSM_STATE_AUTO) {
             (void)app_fsm_post(APP_FSM_EVENT_STOP);
         }
@@ -106,11 +114,10 @@ void app_runtime_process(void) {
             app_fsm_process();
             stopped_for_switch = true;
         }
-        if(app_fsm_get_state() == APP_FSM_STATE_IDLE && s_manual_edge_armed &&
-           app_runtime_sticks_centered()) {
-            s_manual_edge_armed = false;
-            s_motor_starting = true;
-            s_motor_start_since_ms = delay_now_ms();
+        if(app_fsm_get_state() == APP_FSM_STATE_IDLE) {
+            app_runtime_stop(false);
+            if(s_stop_retry_pending) return;
+            s_manual_waiting_ready = true;
             (void)app_fsm_post(APP_FSM_EVENT_SWITCH_TO_MANUAL);
             if(stopped_for_switch) {
                 app_fsm_process();
@@ -132,8 +139,25 @@ void app_runtime_process(void) {
         return;
     }
 
-    /* Check IMU/fusion readiness before any motor preparation can enable output */
-    if(!odom.is_ready()) {
+    /* Disabled steering motors may stop reporting. Allow only the bounded
+       zero-target preparation after IMU calibration; require full odometry
+       before leaving that preparation or applying any driving command. */
+    const Odom* estimate = odom.get_state();
+    if(manual_mode && s_manual_waiting_ready) {
+        /* A two-position SWD selects Manual by level. Calibration and centering
+           may take any time with output disabled; only motor preparation has
+           the bounded startup timeout. */
+        if(!estimate->imu_ready || !estimate->timing_valid || !app_runtime_sticks_centered()) {
+            status = chassis_poll_feedback();
+            if(status != CHASSIS_OK) app_runtime_raise_fault(APP_FAULT_SOURCE_CHASSIS, status);
+            return;
+        }
+        s_manual_waiting_ready = false;
+        s_motor_starting = true;
+        s_motor_start_since_ms = delay_now_ms();
+    }
+    if(!estimate->imu_ready || !estimate->timing_valid ||
+       (!s_motor_starting && !odom.is_ready())) {
         app_runtime_raise_fault(APP_FAULT_SOURCE_ODOM, 1);
         return;
     }
@@ -194,7 +218,7 @@ void app_runtime_process(void) {
         app_runtime_raise_fault(APP_FAULT_SOURCE_CHASSIS, status);
         return;
     }
-    if(chassis.is_ready()) {
+    if(chassis.is_ready() && odom.is_ready()) {
         s_motor_starting = false;
     }
     else if(!s_motor_starting) {
@@ -232,6 +256,7 @@ static void app_runtime_stop(bool force) {
     ChassisErrorCode status;
 
     app_odom_test_reset();
+    s_manual_waiting_ready = false;
     s_motor_starting = false;
     if(s_stop_attempted_this_cycle) return;
     if(!force && s_stop_requested &&
@@ -261,8 +286,11 @@ static void app_runtime_stop(bool force) {
 static void app_runtime_raise_fault(AppFaultSource source, int32_t code) {
     const bool new_fault = !app_fsm_has_fault();
 
-    s_manual_edge_armed = false;
     if(new_fault) {
+        if(source == APP_FAULT_SOURCE_ODOM) {
+            s_odom_fault_snapshot = *odom.get_state();
+            s_odom_fault_was_starting = s_motor_starting;
+        }
         AppFault fault = { source, APP_FAULT_LEVEL_RECOVERABLE, code, delay_now_ms() };
         log_warn("APP_RUNTIME fault: source=%u code=%ld", (unsigned int)source, (long)code);
         (void)app_fsm_raise_fault(&fault);

@@ -145,6 +145,9 @@ static inline void entry_loop(void) {
     }
     uint32_t elapsed_ticks;
     if(assemble_scheduler_take_tick(&elapsed_ticks)) {
+        /* Passive feedback remains live in IDLE/FAULT/ESTOP and is available
+           before this cycle's IMU/odometry update. This never enables motors. */
+        (void)chassis_poll_feedback();
         if(entry_tick_250hz(elapsed_ticks)) {
             odom.process();
         }

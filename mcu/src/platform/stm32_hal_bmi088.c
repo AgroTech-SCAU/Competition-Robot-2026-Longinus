@@ -15,7 +15,7 @@ static void bmi088_accel_cs_low(void);
 static void bmi088_accel_cs_high(void);
 static void bmi088_gyro_cs_low(void);
 static void bmi088_gyro_cs_high(void);
-static uint8_t bmi088_read_write_byte(uint8_t tx_data);
+static bool bmi088_read_write_byte(uint8_t tx_data, uint8_t* rx_data);
 static bool bmi088_transmit_receive_dma(uint8_t* tx_data, uint8_t* rx_data, uint16_t len);
 static void* bmi088_get_spi_handle(void);
 static void bmi088_delay_us(uint16_t us);
@@ -24,6 +24,12 @@ static void bmi088_cache_invalidate(const void* addr, uint32_t len);
 static void stm32_bmi088_exti_callback(uint16_t gpio_pin, void* user);
 
 // ! ========================= 变 量 声 明 ========================= ! //
+
+/* Preserve the last failed transfer for debugger inspection after recovery. */
+static volatile uint32_t s_bmi088_spi_failure_count;
+static volatile HAL_StatusTypeDef s_bmi088_spi_last_failure_status;
+static volatile uint32_t s_bmi088_spi_last_failure_error;
+static volatile uint32_t s_bmi088_spi_last_failure_ms;
 
 static const Bmi088PortOps bmi088_ops = {
     .accel_cs_low = bmi088_accel_cs_low,
@@ -93,11 +99,17 @@ static void bmi088_gyro_cs_high(void) {
     HAL_GPIO_WritePin(GYRO_CS_GPIO_Port, GYRO_CS_Pin, GPIO_PIN_SET);
 }
 
-static uint8_t bmi088_read_write_byte(uint8_t tx_data) {
-    uint8_t rx_data = 0U;
-
-    (void)HAL_SPI_TransmitReceive(&hspi2, &tx_data, &rx_data, 1U, 1000U);
-    return rx_data;
+static bool bmi088_read_write_byte(uint8_t tx_data, uint8_t* rx_data) {
+    if(rx_data == NULL) return false;
+    /* HAL uses millisecond ticks; 2 ms avoids a near-zero wait at a tick boundary. */
+    const HAL_StatusTypeDef status = HAL_SPI_TransmitReceive(&hspi2, &tx_data, rx_data, 1U, 2U);
+    if(status != HAL_OK) {
+        s_bmi088_spi_last_failure_status = status;
+        s_bmi088_spi_last_failure_error = hspi2.ErrorCode;
+        s_bmi088_spi_last_failure_ms = HAL_GetTick();
+        ++s_bmi088_spi_failure_count;
+    }
+    return status == HAL_OK;
 }
 
 static bool bmi088_transmit_receive_dma(uint8_t* tx_data, uint8_t* rx_data, uint16_t len) {

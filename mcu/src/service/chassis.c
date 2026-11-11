@@ -5,6 +5,7 @@
 #include <math.h>
 #include <stdbool.h>
 #include <stddef.h>
+#include <string.h>
 
 // ! ========================= 变 量 声 明 ========================= ! //
 
@@ -58,6 +59,11 @@
  * 需与 TIM6 触发周期保持一致
  */
 #define CHASSIS_CONTROL_PERIOD_S 0.002f
+/* Ordinary zero-command position hold, after the existing velocity stop settles. */
+#define CHASSIS_ZERO_DRIVE_SETTLE_SPEED_RAD_S 0.01f
+#define CHASSIS_ZERO_DRIVE_SETTLE_MS 200u
+#define CHASSIS_ZERO_DRIVE_POSITION_KP 2.0
+#define CHASSIS_ZERO_DRIVE_MAX_SPEED_RAD_S 0.10f
 /**
  * @brief 判定转向目标明显变化的角度阈值
  *
@@ -160,8 +166,17 @@ typedef struct {
  * 对外读取使用同步后的只读快照
  */
 static Chassis s_chassis = { 0 };
+static ChassisObservation s_observation = { .age_ms = UINT32_MAX };
 static bool s_output_enabled = false;
 static bool s_preparing = false;
+static bool s_zero_steer_latched = false;
+static struct {
+    bool settling;
+    bool latched;
+    uint32_t since_ms;
+    double position[CHASSIS_MODULE_COUNT];
+    float velocity[CHASSIS_MODULE_COUNT];
+} s_zero_drive_hold;
 static bool s_self_check_passed = false;
 static uint8_t s_prepare_steer_index;
 static uint8_t s_prepare_drive_index;
@@ -259,6 +274,7 @@ const struct ChassisInterface chassis_interface = {
     .is_self_check_passed = chassis_is_self_check_passed,
     .get_chassis = chassis_get_chassis,
     .get_state = chassis_get_state,
+    .get_observation = chassis_get_observation,
     .get_control = chassis_get_control,
     .error_code_to_str = chassis_error_code_to_str
 };
@@ -268,8 +284,12 @@ const struct ChassisInterface chassis_interface = {
 
 static ChassisErrorCode chassis_motor_status(BusMotorStatus status, const char* action);
 static BusMotorStatus chassis_drive_command(const float velocity[CHASSIS_MODULE_COUNT]);
+static void chassis_reset_zero_drive_hold(void);
+static ChassisErrorCode chassis_update_zero_drive_hold(const BusMotorFeedback feedback[CHASSIS_MODULE_COUNT],
+                                                       float velocity[CHASSIS_MODULE_COUNT]);
 static BusMotorStatus chassis_steer_hold(BusMotorId id);
 static void chassis_transform_imu_tilt(float* vx, float* vy, bool to_body);
+static bool chassis_refresh_observation(void);
 
 
 /**
@@ -512,8 +532,11 @@ ChassisErrorCode chassis_init(const ChassisConfig* config) {
     s_chassis.brake_latched = false;
     s_chassis.steer_then_drive_enabled = true;
     s_chassis.initialized = false;
+    s_observation = (ChassisObservation){ .age_ms = UINT32_MAX };
     s_output_enabled = false;
     s_preparing = false;
+    s_zero_steer_latched = false;
+    chassis_reset_zero_drive_hold();
     s_imu_tilt.reference_valid = false;
     s_imu_tilt.projection_valid = false;
     s_prepare_steer_index = s_prepare_drive_index = 0u;
@@ -538,6 +561,7 @@ ChassisErrorCode chassis_init(const ChassisConfig* config) {
     }
 
     s_chassis.initialized = true;
+    chassis_sync_view();
     log_info("CHASSIS init done");
     return ch.OK;
 }
@@ -564,11 +588,16 @@ ChassisErrorCode chassis_set_velocity(float vx, float vy, float wz) {
        (s_preparing && (vx != 0.0f || vy != 0.0f || wz != 0.0f))) {
         return ch.INVALID_PARAM;
     }
+    if(vx != 0.0f || vy != 0.0f || wz != 0.0f) {
+        s_zero_steer_latched = false;
+        chassis_reset_zero_drive_hold();
+    }
     chassis_transform_imu_tilt(&vx, &vy, true);
     s_chassis.brake_requested = false;
     s_chassis.brake_latched = false;
     wz_for_ik = wz - chassis_calc_yaw_bias_ext(vx, vy);
     chassis_external_to_internal_twist(vx, vy, wz_for_ik, &s_chassis.kine.control.vx, &s_chassis.kine.control.vy, &s_chassis.kine.control.wz);
+    chassis_sync_view();
 
     return ch.OK;
 }
@@ -610,10 +639,14 @@ ChassisErrorCode chassis_process(void) {
         return chassis_stop();
     }
     /* Waiting for preparation ACKs must not submit any movement targets */
-    if(s_preparing)
+    if(s_preparing) {
+        chassis_reset_zero_drive_hold();
         return chassis_motor_status(s_chassis.config.motor_poll_feedback(), "startup feedback");
+    }
 
-    if(s_chassis.config.motor_update() != MOTOR_STATUS_OK) {
+    const BusMotorStatus updated = s_chassis.config.motor_update();
+    const bool observation_ready = chassis_refresh_observation();
+    if(updated != MOTOR_STATUS_OK) {
         (void)chassis_stop();
         return ch.MOTOR_COMMAND_FAILED;
     }
@@ -648,25 +681,15 @@ ChassisErrorCode chassis_process(void) {
 
     if(!chassis_maintain_motor_startup(steer_feedback_observed, steer_missing_mask,
                                        drive_feedback_observed, drive_missing_mask)) {
-        s_chassis.kine.state.cur_vx = 0.0f;
-        s_chassis.kine.state.cur_vy = 0.0f;
-        s_chassis.kine.state.cur_wz = 0.0f;
         chassis_sync_view();
         (void)chassis_stop();
         return ch.MOTOR_COMMAND_FAILED;
     }
 
     s_self_check_passed = true;
-
-    for(i = 0u; i < CHASSIS_MODULE_COUNT; ++i) {
-        const ChassisModuleMap* map = &s_module_map[i];
-        float drive_omega = (float)s_chassis.config.drive_sign[map->module] * drive_feedback[i].velocity;
-        float steer_abs_angle = steer_feedback[i].position;
-
-        s_module_fb[map->module].drive_omega = drive_omega;
-        s_module_fb[map->module].steer_abs_angle = steer_abs_angle;
-        s_chassis.kine.state.cur_wheels[map->module].wheel_omega = chassis_drive_omega_to_wheel_omega(drive_omega);
-        s_chassis.kine.state.cur_wheels[map->module].steer_angle = chassis_wrap_pi(-steer_abs_angle);
+    if(!observation_ready) {
+        (void)chassis_stop();
+        return ch.KINEMATICS_FAILED;
     }
 
     if(s_chassis.brake_requested) {
@@ -697,24 +720,41 @@ ChassisErrorCode chassis_process(void) {
             }
         }
 
-        for(i = 0u; i < CHASSIS_MODULE_COUNT; ++i) {
-            s_chassis.kine.state.cur_wheels[i].wheel_omega = 0.0f;
-        }
-        s_chassis.kine.state.cur_vx = 0.0f;
-        s_chassis.kine.state.cur_vy = 0.0f;
-        s_chassis.kine.state.cur_wz = 0.0f;
     }
     else {
         bool drive_ready;
+        const bool zero_command = s_chassis.kine.control.vx == 0.0f &&
+            s_chassis.kine.control.vy == 0.0f && s_chassis.kine.control.wz == 0.0f;
 
-        if(swheel.ik(&s_chassis.kine) != swheel.OK) {
-            return ch.KINEMATICS_FAILED;
+        if(zero_command) {
+            if(!s_zero_steer_latched) {
+                /* Capture only after preparation and valid feedback. Keep the
+                 * absolute motor angle so stopping cannot select another turn. */
+                for(i = 0u; i < CHASSIS_MODULE_COUNT; ++i) {
+                    s_module_cmd[i].steer_target_abs_angle = s_module_fb[i].steer_abs_angle;
+                    s_module_cmd[i].wheel_omega = 0.0f;
+                    s_module_cmd[i].drive_inverted = false;
+                    s_chassis.kine.control.wheels[i].steer_angle = chassis_wrap_pi(-s_module_fb[i].steer_abs_angle);
+                    s_chassis.kine.control.wheels[i].wheel_omega = 0.0f;
+                }
+                chassis_reset_steer_speed_profiles();
+                s_zero_steer_latched = true;
+            }
+            /* Repeated zero commands retain this target while FK continues to
+             * observe the real angles, rather than making feedback the target. */
         }
+        else {
+            s_zero_steer_latched = false;
+            chassis_reset_zero_drive_hold();
+            if(swheel.ik(&s_chassis.kine) != swheel.OK) {
+                return ch.KINEMATICS_FAILED;
+            }
 
-        for(i = 0u; i < CHASSIS_MODULE_COUNT; ++i) {
-            const ChassisModuleMap* map = &s_module_map[i];
+            for(i = 0u; i < CHASSIS_MODULE_COUNT; ++i) {
+                const ChassisModuleMap* map = &s_module_map[i];
 
-            chassis_resolve_drive_module_command(map->module);
+                chassis_resolve_drive_module_command(map->module);
+            }
         }
 
         drive_ready = !s_chassis.steer_then_drive_enabled || chassis_drive_targets_reached();
@@ -731,10 +771,14 @@ ChassisErrorCode chassis_process(void) {
             drive_targets[map->module] = drive_ready
                 ? (float)s_chassis.config.drive_sign[map->module] * target_speed : 0.0f;
         }
-
-        if(swheel.fk(&s_chassis.kine) != swheel.OK) {
-            return ch.KINEMATICS_FAILED;
+        if(result == ch.OK && zero_command) {
+            result = chassis_update_zero_drive_hold(drive_feedback, drive_targets);
+            if(!drive_ready) {
+                memset(drive_targets, 0, sizeof(drive_targets));
+                memset(s_zero_drive_hold.velocity, 0, sizeof(s_zero_drive_hold.velocity));
+            }
         }
+
     }
 
     if(result == ch.OK) {
@@ -772,6 +816,8 @@ ChassisErrorCode chassis_stop(void) {
     s_chassis.kine.control.wz = 0.0f;
     s_chassis.brake_requested = false;
     s_chassis.brake_latched = false;
+    s_zero_steer_latched = false;
+    chassis_reset_zero_drive_hold();
     chassis_reset_steer_speed_profiles();
 
     /* RX faults remain latched for runtime to report/clear. They must not make
@@ -804,7 +850,12 @@ ChassisErrorCode chassis_stop(void) {
             (void)chassis_motor_status(bus_motor.basic.disable(s_module_map[i].steer_id), "fallback disable steer");
         }
     }
+    chassis_sync_view();
     return result;
+}
+
+bool chassis_is_output_enabled(void) {
+    return s_output_enabled;
 }
 
 ChassisErrorCode chassis_set_output_enabled(bool enabled) {
@@ -867,6 +918,8 @@ ChassisErrorCode chassis_brake(void) {
     s_chassis.kine.control.vx = 0.0f;
     s_chassis.kine.control.vy = 0.0f;
     s_chassis.kine.control.wz = 0.0f;
+    s_zero_steer_latched = false;
+    chassis_reset_zero_drive_hold();
     if(!s_chassis.brake_requested) {
         s_chassis.brake_latched = false;
         chassis_reset_steer_speed_profiles();
@@ -890,6 +943,22 @@ const Chassis* chassis_get_chassis(void) {
  */
 const SteerWheelState* chassis_get_state(void) {
     return &s_chassis_view.kine.state;
+}
+
+bool chassis_get_observation(ChassisObservation* observation) {
+    if(observation == NULL) return false;
+    *observation = s_observation;
+    if(!s_chassis.initialized) {
+        observation->valid = false;
+        return false;
+    }
+    uint32_t latest_ms;
+    uint32_t latest_sequence;
+    observation->age_ms = (uint32_t)(s_chassis.config.now_ms() - observation->sample_time_ms);
+    observation->valid = observation->valid && s_chassis.config.feedback_is_healthy() &&
+        s_chassis.config.feedback_sample_time_ms(&latest_ms, &latest_sequence) &&
+        latest_sequence == observation->sample_sequence;
+    return observation->valid;
 }
 
 /**
@@ -995,7 +1064,8 @@ static ChassisErrorCode chassis_check_config(const ChassisConfig* config) {
        config->set_steer_target == NULL || config->motor_update == NULL || config->motor_poll_feedback == NULL ||
        config->cancel_pending_commands == NULL || config->disable_drive_motors == NULL ||
        config->clear_motor_fault == NULL || config->feedback_is_valid == NULL ||
-       config->feedback_is_healthy == NULL) {
+       config->feedback_is_healthy == NULL || config->now_ms == NULL ||
+        config->feedback_sample_time_ms == NULL || config->read_drive_positions == NULL) {
         return ch.DEPENDENCY_MISSING;
     }
     for(uint8_t i = 0u; i < CHASSIS_MODULE_COUNT; ++i) {
@@ -1467,6 +1537,48 @@ static ChassisErrorCode chassis_motor_status(BusMotorStatus status, const char* 
     }
 }
 
+static void chassis_reset_zero_drive_hold(void) {
+    memset(&s_zero_drive_hold, 0, sizeof(s_zero_drive_hold));
+}
+
+static ChassisErrorCode chassis_update_zero_drive_hold(const BusMotorFeedback feedback[CHASSIS_MODULE_COUNT],
+                                                       float velocity[CHASSIS_MODULE_COUNT]) {
+    double position[CHASSIS_MODULE_COUNT];
+    if(!s_chassis.config.read_drive_positions(position)) return ch.MOTOR_COMMAND_FAILED;
+    for(uint8_t i = 0u; i < CHASSIS_MODULE_COUNT; ++i) {
+        if(!isfinite(position[i])) return ch.MOTOR_COMMAND_FAILED;
+    }
+
+    if(!s_zero_drive_hold.latched) {
+        for(uint8_t i = 0u; i < CHASSIS_MODULE_COUNT; ++i) {
+            if(fabsf(feedback[i].velocity) > CHASSIS_ZERO_DRIVE_SETTLE_SPEED_RAD_S) {
+                s_zero_drive_hold.settling = false;
+                return ch.OK;
+            }
+        }
+        const uint32_t now_ms = s_chassis.config.now_ms();
+        if(!s_zero_drive_hold.settling) {
+            s_zero_drive_hold.settling = true;
+            s_zero_drive_hold.since_ms = now_ms;
+            return ch.OK;
+        }
+        if((uint32_t)(now_ms - s_zero_drive_hold.since_ms) < CHASSIS_ZERO_DRIVE_SETTLE_MS) return ch.OK;
+        /* Anchor where braking finished, never the position before braking. */
+        memcpy(s_zero_drive_hold.position, position, sizeof(position));
+        s_zero_drive_hold.latched = true;
+        s_zero_drive_hold.settling = false;
+    }
+
+    for(uint8_t i = 0u; i < CHASSIS_MODULE_COUNT; ++i) {
+        const double correction = CHASSIS_ZERO_DRIVE_POSITION_KP * (s_zero_drive_hold.position[i] - position[i]);
+        const double limited = fmax(-(double)CHASSIS_ZERO_DRIVE_MAX_SPEED_RAD_S,
+                                    fmin((double)CHASSIS_ZERO_DRIVE_MAX_SPEED_RAD_S, correction));
+        /* Both position and output use native motor signs; do not apply drive_sign again. */
+        velocity[i] = s_zero_drive_hold.velocity[i] = (float)limited;
+    }
+    return ch.OK;
+}
+
 static BusMotorStatus chassis_drive_command(const float velocity[CHASSIS_MODULE_COUNT]) {
     BusMotorCommand commands[CHASSIS_MODULE_COUNT];
 
@@ -1498,12 +1610,51 @@ ChassisErrorCode chassis_poll(void) {
 
 ChassisErrorCode chassis_poll_feedback(void) {
     if(!s_chassis.initialized) return ch.NOT_INITIALIZED;
-    if(s_chassis.config.motor_poll_feedback() != MOTOR_STATUS_OK) {
+    const BusMotorStatus received = s_chassis.config.motor_poll_feedback();
+    (void)chassis_refresh_observation();
+    if(received != MOTOR_STATUS_OK) {
         s_self_check_passed = false;
         return ch.MOTOR_COMMAND_FAILED;
     }
     chassis_refresh_self_check();
     return ch.OK;
+}
+
+static bool chassis_refresh_observation(void) {
+    BusMotorFeedback steer_feedback[CHASSIS_MODULE_COUNT];
+    BusMotorFeedback drive_feedback[CHASSIS_MODULE_COUNT];
+    uint32_t sample_time_ms;
+    uint32_t sample_sequence;
+
+    s_observation.valid = false;
+    if(!s_chassis.config.feedback_is_healthy() ||
+       !s_chassis.config.feedback_sample_time_ms(&sample_time_ms, &sample_sequence)) return false;
+    for(uint8_t i = 0u; i < CHASSIS_MODULE_COUNT; ++i) {
+        const ChassisModuleMap* map = &s_module_map[i];
+        if(bus_motor.feedback.all(map->steer_id, &steer_feedback[i]) != MOTOR_STATUS_OK ||
+           !chassis_feedback_sample_is_usable(&steer_feedback[i], true) ||
+           bus_motor.feedback.all(map->drive_id, &drive_feedback[i]) != MOTOR_STATUS_OK ||
+           !chassis_feedback_sample_is_usable(&drive_feedback[i], false)) return false;
+    }
+    for(uint8_t i = 0u; i < CHASSIS_MODULE_COUNT; ++i) {
+        const ChassisModule module = s_module_map[i].module;
+        const float drive_omega = (float)s_chassis.config.drive_sign[module] * drive_feedback[i].velocity;
+        s_module_fb[module].drive_omega = drive_omega;
+        s_module_fb[module].steer_abs_angle = steer_feedback[i].position;
+        s_chassis.kine.state.cur_wheels[module].wheel_omega = chassis_drive_omega_to_wheel_omega(drive_omega);
+        s_chassis.kine.state.cur_wheels[module].steer_angle = chassis_wrap_pi(-steer_feedback[i].position);
+    }
+    if(swheel.fk(&s_chassis.kine) != swheel.OK) return false;
+    chassis_sync_view();
+    s_observation.raw_velocity = (ChassisVelocity){ s_chassis.kine.state.cur_vx,
+        s_chassis.kine.state.cur_vy, s_chassis.kine.state.cur_wz };
+    s_observation.velocity = (ChassisVelocity){ s_chassis_view.kine.state.cur_vx,
+        s_chassis_view.kine.state.cur_vy, s_chassis_view.kine.state.cur_wz };
+    s_observation.sample_time_ms = sample_time_ms;
+    s_observation.sample_sequence = sample_sequence;
+    s_observation.age_ms = (uint32_t)(s_chassis.config.now_ms() - sample_time_ms);
+    s_observation.valid = true;
+    return true;
 }
 
 ChassisErrorCode chassis_clear_motor_fault(void) {

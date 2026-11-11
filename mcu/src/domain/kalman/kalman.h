@@ -114,6 +114,8 @@ extern const struct KalmanInterface {
      * @return KalmanErrorCode 状态码
      */
     KalmanErrorCode (*filter_predict)(KalmanFilter* filter);
+    /** @brief 使用调用方计算的非线性均值预测；F 必须是该预测的 Jacobian */
+    KalmanErrorCode (*filter_predict_state)(KalmanFilter* filter, const float* predicted_state);
     /**
      * @brief 执行一次观测更新步骤
      * @param filter 滤波器实例；调用前需由上层填好 z、H、R
@@ -146,6 +148,8 @@ KalmanErrorCode kalman_filter_init(KalmanFilter* filter, uint8_t state_dim, uint
  * @return KalmanErrorCode 状态码
  */
 KalmanErrorCode kalman_filter_predict(KalmanFilter* filter);
+/** @brief 非线性预测：x=predicted_state，P=F P F^T+Q */
+KalmanErrorCode kalman_filter_predict_state(KalmanFilter* filter, const float* predicted_state);
 /**
  * @brief 执行一次观测更新步骤
  * @param filter 滤波器实例；调用前需由上层填好 z、H、R
