@@ -25,10 +25,14 @@ typedef struct {
 SystemStatus assemble_delay(void);
 SystemStatus assemble_log(void);
 void assemble_log_tuning(float remaining_m);
+void assemble_log_laser(void);
 SystemStatus assemble_rgb(void);
 SystemStatus assemble_imu(void);
 SystemStatus assemble_chassis(void);
 SystemStatus assemble_odom(void);
+SystemStatus assemble_laser(void);
+void assemble_laser_process(void);
+void assemble_laser_log_diagnostics(void);
 SystemStatus assemble_remote(void);
 SystemStatus assemble_tim6_500hz(void);
 /** Consume the newest tick once; elapsed_ticks includes skipped periods

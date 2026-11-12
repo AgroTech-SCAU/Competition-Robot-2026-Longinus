@@ -1,4 +1,5 @@
 #include "stm32_hal_can.h"
+#include "fdcan.h"
 
 #include <stddef.h>
 #include <string.h>
@@ -30,7 +31,7 @@ typedef struct {
  * @brief CAN 接收回调槽位表
  */
 static CanRxCallbackSlot s_rx_slots[CAN_RX_CALLBACK_SLOT_NUM];
-static volatile BspCanDiagnostics s_can_diagnostics[2];
+static volatile BspCanDiagnostics s_can_diagnostics[3];
 static volatile BspCanDiagnostics* can_diagnostics_for(FDCAN_HandleTypeDef* hcan);
 
 static BspCanStatus can_record_tx(FDCAN_HandleTypeDef* hcan, uint32_t id, BspCanStatus status);
@@ -319,6 +320,7 @@ void can_critical_exit(uint32_t state) {
 static volatile BspCanDiagnostics* can_diagnostics_for(FDCAN_HandleTypeDef* hcan) {
     if(hcan == &hfdcan1) return &s_can_diagnostics[0];
     if(hcan == &hfdcan2) return &s_can_diagnostics[1];
+    if(hcan == &hfdcan3) return &s_can_diagnostics[2];
     return NULL;
 }
 

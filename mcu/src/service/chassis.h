@@ -117,6 +117,8 @@ typedef struct {
     /* Preparation advances bounded steps; BUSY asks the caller to poll next tick */
     BusMotorStatus (*prepare_steer_motor)(BusMotorId id);
     BusMotorStatus (*prepare_drive_motor)(BusMotorId id);
+    /* Optional refresh of stationary targets for motors already prepared. */
+    BusMotorStatus (*keep_prepared_steering)(void);
     BusMotorStatus (*set_steer_target)(BusMotorId id, float position, float velocity);
     BusMotorStatus (*motor_update)(void);
     BusMotorStatus (*motor_poll_feedback)(void);

@@ -9,23 +9,26 @@
 #include "app_odom_test.h"
 #include "chassis.h"
 #include "delay.h"
+#include "laser_odom.h"
 #include "odom.h"
 #include "remote.h"
 
 static uint32_t test_now;
 static bool test_online, test_clear_event, test_clear_active;
+static bool test_laser_online;
 static bool test_output_enabled, test_motor_ready;
 static unsigned test_enable_calls, test_zero_calls, test_manual_calls, test_auto_calls;
 static FsIa10bData test_remote;
 static Odom test_odom;
 
 ms_t delay_now_ms(void) { return test_now; }
+bool laser_odom_is_online(void) { return test_laser_online; }
 bool remote_is_online(uint32_t timeout_ms) { (void)timeout_ms; return test_online; }
 bool remote_is_manual_requested(void) {
-    return test_online && test_remote.channel[REMOTE_CH_SWD] == REMOTE_SW_LOW;
+    return test_online && test_remote.channel[REMOTE_CH_SWD] == REMOTE_SW_HIGH;
 }
 bool remote_is_auto_requested(void) {
-    return test_online && test_remote.channel[REMOTE_CH_SWD] == REMOTE_SW_HIGH;
+    return test_online && test_remote.channel[REMOTE_CH_SWD] == REMOTE_SW_LOW;
 }
 bool remote_take_clear_reset_event(void) {
     const bool pending = test_online && test_clear_event;
@@ -82,13 +85,14 @@ AppControlResult app_odom_test_process(void) {
 static void reset_fixture(void) {
     test_now = 0u;
     test_online = true;
+    test_laser_online = true;
     test_clear_event = test_clear_active = false;
     test_output_enabled = test_motor_ready = false;
     test_enable_calls = test_zero_calls = test_manual_calls = test_auto_calls = 0u;
     memset(&test_odom, 0, sizeof(test_odom));
     memset(&test_remote, 0, sizeof(test_remote));
     for(unsigned i = 0u; i < FS_IA10B_CHANNEL_COUNT; ++i) test_remote.channel[i] = REMOTE_CENTER;
-    test_remote.channel[REMOTE_CH_SWD] = REMOTE_SW_LOW; /* Two-position SWD already in Manual. */
+    test_remote.channel[REMOTE_CH_SWD] = REMOTE_SW_HIGH; /* CH8 negative selects Manual. */
     app_runtime_init();
 }
 static void step(uint32_t elapsed_ms) {
@@ -125,6 +129,11 @@ static void test_level_selection_wait_and_prepare(void) {
     assert(test_manual_calls == 0u);
     step(2u);
     assert(test_manual_calls == 1u && app_runtime_get_state() == APP_FSM_STATE_MANUAL);
+    assert(app_runtime_is_self_check_passed());
+    test_laser_online = false;
+    assert(!app_runtime_is_self_check_passed());
+    step(2u);
+    assert(test_manual_calls == 2u && !app_runtime_has_fault());
 }
 
 static void test_actual_preparation_timeout_and_nonzero_stick(void) {
@@ -190,13 +199,13 @@ static void test_offline_and_existing_auto_flow(void) {
 
     reset_fixture();
     all_ready();
-    test_remote.channel[REMOTE_CH_SWD] = REMOTE_SW_HIGH;
+    test_remote.channel[REMOTE_CH_SWD] = REMOTE_SW_LOW;
     step(2u);
     assert(app_runtime_get_state() == APP_FSM_STATE_AUTO && test_output_enabled);
     assert(test_zero_calls == 1u && test_auto_calls == 0u);
     step(2u);
     assert(test_auto_calls == 1u);
-    test_remote.channel[REMOTE_CH_SWD] = REMOTE_SW_LOW;
+    test_remote.channel[REMOTE_CH_SWD] = REMOTE_SW_HIGH;
     step(2u);
     assert(app_runtime_get_state() == APP_FSM_STATE_MANUAL && !test_output_enabled);
     step(2u);

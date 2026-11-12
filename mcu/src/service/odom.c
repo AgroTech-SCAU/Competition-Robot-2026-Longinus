@@ -356,6 +356,17 @@ OdomStatus odom_get_odom(Vector3* odom_out) {
     return odom_copy_vec3(s_odom.fusion_ready, &s_odom.odom, odom_out);
 }
 
+OdomStatus odom_relocalize_xy(float x_m, float y_m) {
+    if(!odom_is_ready()) return od.NOT_READY;
+    if(!isfinite(x_m) || !isfinite(y_m)) return od.INVALID_PARAM;
+    const Vector3 position = { x_m, y_m, s_odom.odom.z };
+    if(chassis_imu_odom.reset_odom(&s_fusion, position) != chassis_imu_odom.OK) {
+        return od.FUSION_FAILED;
+    }
+    s_odom.odom = position;
+    return od.OK;
+}
+
 /**
  * @brief 获取融合后的底盘速度
  * @details x/y/z 分别表示 base_link 坐标系下的 vx/vy/wz

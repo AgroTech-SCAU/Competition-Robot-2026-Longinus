@@ -8,6 +8,7 @@
 #include "app_odom_test.h"
 #include "chassis.h"
 #include "delay.h"
+#include "laser_odom.h"
 #include "log.h"
 #include "odom.h"
 #include "remote.h"
@@ -240,7 +241,8 @@ bool app_runtime_has_fault(void) {
 
 bool app_runtime_is_self_check_passed(void) {
     return !app_fsm_has_fault() && app_fsm_get_state() != APP_FSM_STATE_ESTOP &&
-           remote_is_online(100u) && odom.is_ready() && chassis.is_self_check_passed();
+           remote_is_online(100u) && odom.is_ready() && chassis.is_self_check_passed() &&
+           laser_odom_is_online();
 }
 
 static bool app_runtime_sticks_centered(void) {

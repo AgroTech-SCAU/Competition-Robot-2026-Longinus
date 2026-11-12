@@ -234,6 +234,8 @@ OdomStatus odom_get_angle(Vector3* angle);
  * @return OdomStatus 状态码
  */
 OdomStatus odom_get_odom(Vector3* odom_out);
+/** Set the planar position in the existing odometry frame. Main-loop only. */
+OdomStatus odom_relocalize_xy(float x_m, float y_m);
 /**
  * @brief 获取融合后的底盘速度
  * @details x/y/z 分别表示 base_link 坐标系下的 vx/vy/wz

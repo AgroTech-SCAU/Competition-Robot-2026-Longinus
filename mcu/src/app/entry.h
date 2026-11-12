@@ -105,6 +105,12 @@ static inline void entry_init(void) {
     if(!entry_boot_check(assemble_chassis(), "chassis"))
         return;
     log_info("BOOT chassis ready");
+    if(assemble_laser() == SYSTEM_STATUS_OK) {
+        log_info("BOOT CAN3 1M RX 0x601 waiting for S21C");
+    }
+    else {
+        log_error("BOOT CAN3 RX initialization failed");
+    }
     if(!entry_chassis_settle(100u)) return;
 
     if(!entry_boot_check(assemble_remote(), "remote"))
@@ -148,6 +154,7 @@ static inline void entry_loop(void) {
         /* Passive feedback remains live in IDLE/FAULT/ESTOP and is available
            before this cycle's IMU/odometry update. This never enables motors. */
         (void)chassis_poll_feedback();
+        assemble_laser_process();
         if(entry_tick_250hz(elapsed_ticks)) {
             odom.process();
         }

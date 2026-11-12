@@ -1,21 +1,24 @@
 #include "assemble.h"
 
+#include "app_odom_test.h"
 #include "chassis.h"
 #include "delay.h"
+#include "laser_odom.h"
 #include "log.h"
 #include "odom.h"
 #include "stm32_hal_uart.h"
 
+#include <math.h>
 #include <string.h>
 
 // ! ========================= 变 量 声 明 ========================= ! //
 
-static bool s_plot_requested;
+static bool s_nonblocking_requested;
 static uint8_t s_plot_tx[LOG_BUFFER_SIZE];
 
-/* Both callers are in the main loop. The UART IRQ only drains the plot buffer. */
+/* Callers are in the main loop. The UART IRQ only drains the TX buffer. */
 static bool log_uart_write(const char* data, uint32_t len) {
-    if(s_plot_requested) {
+    if(s_nonblocking_requested) {
         if(huart1.gState != HAL_UART_STATE_READY || len > sizeof(s_plot_tx)) {
             return false;
         }
@@ -73,7 +76,22 @@ void assemble_log_tuning(float rem) {
     const float vy = estimate->velocity.y;
     const float wz = estimate->velocity.z;
 
-    s_plot_requested = true;
+    s_nonblocking_requested = true;
     (void)log_vofa(ms, x, y, yaw, vx_cmd, vy_cmd, vx_fk, vy_fk, wz_fk, gz, vx, vy, wz, rem, active);
-    s_plot_requested = false;
+    s_nonblocking_requested = false;
+}
+
+void assemble_log_laser(void) {
+    const LaserOdomSample* sample = laser_odom_get_sample();
+    if(!laser_odom_is_online()) return;
+
+    const AppLaserFix fix = app_odom_test_get_laser_fix();
+    s_nonblocking_requested = true;
+    log_info("LASER POS seg=%u frame=%lu F=%u B=%u L=%u R=%u mm x=%.3f y=%.3f m fix=0x%X",
+             fix.segment, (unsigned long)sample->received,
+             (unsigned int)sample->distance_mm[LASER_FRONT], (unsigned int)sample->distance_mm[LASER_REAR],
+             (unsigned int)sample->distance_mm[LASER_LEFT], (unsigned int)sample->distance_mm[LASER_RIGHT],
+             (double)((fix.mask & APP_LASER_X) ? fix.x : NAN),
+             (double)((fix.mask & APP_LASER_Y) ? fix.y : NAN), fix.mask);
+    s_nonblocking_requested = false;
 }

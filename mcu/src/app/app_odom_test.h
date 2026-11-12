@@ -3,6 +3,17 @@
 
 #include "app_control.h"
 
+enum { APP_LASER_X = 1u, APP_LASER_Y = 2u };
+
+typedef struct {
+    float x;
+    float y;
+    unsigned int mask;
+    unsigned int segment;
+} AppLaserFix;
+
+AppLaserFix app_odom_test_get_laser_fix(void);
+
 /* Reset on runtime initialization or leaving active control. */
 void app_odom_test_reset(void);
 

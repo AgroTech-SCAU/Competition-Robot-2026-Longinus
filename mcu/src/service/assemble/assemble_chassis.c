@@ -11,6 +11,7 @@
 #include <string.h>
 
 #define CHASSIS_FEEDBACK_TIMEOUT_MS 100u
+#define CHASSIS_PREPARED_STEER_HOLD_MS 20u
 #define CHASSIS_DRIVE_GROUP 1u
 #define CHASSIS_RX_QUEUE_COUNT 64u
 #define CHASSIS_MOTOR_COUNT (2u * CHASSIS_MODULE_COUNT)
@@ -88,6 +89,7 @@ static BusMotorStatus chassis_cancel_pending_commands(void);
 static void chassis_reset_transport(void);
 static BusMotorStatus chassis_prepare_steer_motor(BusMotorId id);
 static BusMotorStatus chassis_prepare_drive_motor(BusMotorId id);
+static BusMotorStatus chassis_keep_prepared_steering(void);
 static BusMotorStatus chassis_set_steer_target(BusMotorId id, float position, float velocity);
 static void chassis_steer_can_rx_callback(FDCAN_HandleTypeDef*, const FDCAN_RxHeaderTypeDef*, const uint8_t data[8], void*);
 static void chassis_drive_can_rx_callback(FDCAN_HandleTypeDef*, const FDCAN_RxHeaderTypeDef*, const uint8_t data[8], void*);
@@ -115,6 +117,7 @@ SystemStatus assemble_chassis(void) {
     ChassisConfig config = {
         .prepare_steer_motor = chassis_prepare_steer_motor,
         .prepare_drive_motor = chassis_prepare_drive_motor,
+        .keep_prepared_steering = chassis_keep_prepared_steering,
         .set_steer_target = chassis_set_steer_target,
         .motor_update = chassis_motor_update,
         .motor_poll_feedback = chassis_receive_feedback,
@@ -404,6 +407,7 @@ static BusMotorStatus chassis_prepare_steer_motor(BusMotorId id) {
             if(status == MOTOR_STATUS_OK && feedback.state == BUS_MOTOR_STATE_ENABLED &&
                s_feedback_sequence[index] != state->feedback_sequence) {
                 state->phase = PREPARE_DONE;
+                state->since_ms = HAL_GetTick();
                 return MOTOR_STATUS_OK;
             }
             return chassis_prepare_wait_status(state, status);
@@ -441,6 +445,27 @@ static BusMotorStatus chassis_prepare_drive_motor(BusMotorId id) {
     }
     return status == MOTOR_STATUS_OK ? MOTOR_STATUS_BUSY : status;
 }
+
+static BusMotorStatus chassis_keep_prepared_steering(void) {
+    const uint32_t now = HAL_GetTick();
+    for(uint8_t i = 0u; i < CHASSIS_MODULE_COUNT; ++i) {
+        ChassisPrepareState* state = &s_steer_prepare[i];
+        if(state->phase != PREPARE_DONE ||
+           (uint32_t)(now - state->since_ms) < CHASSIS_PREPARED_STEER_HOLD_MS) {
+            continue;
+        }
+        /* Refresh command-driven feedback with the original stationary target. */
+        const BusMotorId id = s_steer_ids[i];
+        const BusMotorStatus status = dm_motor_set_pos_vel(id, state->position, 0.0f);
+        if(status != MOTOR_STATUS_OK) {
+            log_warn("CHASSIS steer_id=%u prepared hold failed: %s", id, bus_motor.status_str(status));
+            return status;
+        }
+        state->since_ms = now;
+    }
+    return MOTOR_STATUS_OK;
+}
+
 static BusMotorStatus chassis_set_steer_target(BusMotorId id, float position, float velocity) {
     return dm_motor_set_pos_vel(id, position, velocity);
 }

@@ -890,7 +890,11 @@ ChassisErrorCode chassis_set_output_enabled(bool enabled) {
         s_chassis.drive_motor_ready = false;
     }
     if(s_preparing) {
-        ChassisErrorCode status = chassis_prepare_steer_motors();
+        ChassisErrorCode status = ch.OK;
+        if(s_chassis.config.keep_prepared_steering != NULL) {
+            status = chassis_motor_status(s_chassis.config.keep_prepared_steering(), "prepared steer hold");
+        }
+        if(status == ch.OK) status = chassis_prepare_steer_motors();
         if(status == ch.OK && s_prepare_steer_index == CHASSIS_MODULE_COUNT)
             status = chassis_prepare_drive_motors();
         if(status != ch.OK) {
