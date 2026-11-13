@@ -1,0 +1,119 @@
+<!doctype html>
+<html lang="zh-CN">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width,initial-scale=1">
+  <meta name="color-scheme" content="dark">
+  <title>Longinus 调参与回放</title>
+  <link rel="stylesheet" href="style.css">
+  <script type="module" src="app.js"></script>
+</head>
+<body>
+  <header class="top">
+    <div class="identity"><span class="mark" aria-hidden="true">L</span><div><div class="brand">Longinus</div><div class="subbrand">调参与回放</div></div></div>
+    <nav aria-label="工作台视图">
+      <button type="button" data-view="replay" aria-pressed="true">试跑回放</button>
+      <button type="button" data-view="tuning" aria-pressed="false">参数草案</button>
+      <button type="button" data-view="calibration" aria-pressed="false">实测标定</button>
+    </nav>
+    <div class="header-actions"><span class="offline"><i></i> 离线</span><button class="primary" id="import-button" type="button">导入日志</button></div>
+    <input type="file" id="import-files" accept=".log,.txt,.csv,.ndjson,.json,.jsonl" multiple hidden>
+  </header>
+  <main>
+    <div id="notice" class="notice" role="status" hidden></div>
+    <section id="replay-view" aria-label="试跑回放">
+      <div class="intro">
+        <div><h1>试跑回放</h1><p>七沟轨迹、车速和航向共用一条时间轴。</p></div>
+        <button id="export-run" type="button">保存本趟归档</button>
+      </div>
+      <div class="run-controls panel">
+        <label><span class="run-token">A</span><select id="run-a" aria-label="试跑 A"></select></label>
+        <label><span class="run-token secondary">B</span><select id="run-b" aria-label="试跑 B"></select></label>
+        <p id="run-meta"></p>
+        <button id="run-details-toggle" type="button" aria-controls="run-details" aria-expanded="false">档案与坐标</button>
+      </div>
+      <section class="panel run-details" id="run-details" aria-label="档案与坐标" hidden>
+        <form id="metadata-form">
+          <label>试跑名称<input name="name" required maxlength="100"></label>
+          <label>设备编号<input name="deviceId" maxlength="100"></label>
+          <label>固件版本<input name="firmware" maxlength="160"></label>
+          <label>参数版本<input name="parameterRevision" maxlength="160"></label>
+          <label>路线版本<input name="routeRevision" maxlength="160"></label>
+          <label>标定版本<input name="calibrationRevision" maxlength="160"></label>
+          <label>地面与载荷<input name="conditions" maxlength="160"></label>
+          <label>备注<input name="notes" maxlength="250"></label>
+          <button type="submit">保存档案信息</button>
+        </form>
+        <div class="attachments">
+          <p id="attached-files"></p>
+          <button type="button" id="attach-logs">附加同趟原始日志</button>
+          <input type="file" id="attach-files" accept=".log,.txt,.csv,.ndjson,.json,.jsonl" multiple hidden>
+        </div>
+        <form id="registration-form">
+          <p>场地坐标 = R(偏航) × 里程计坐标 + 平移。只有明确登记后才把实车里程计叠到七沟图。</p>
+          <label>平移 X (m)<input name="tx" type="number" step="any" required></label>
+          <label>平移 Y (m)<input name="ty" type="number" step="any" required></label>
+          <label>偏航 (°)<input name="heading" type="number" step="any" required></label>
+          <button type="submit">登记场地变换</button>
+          <button type="button" id="load-calibration">从标定 JSON 读取</button>
+          <button type="button" id="clear-registration">取消登记</button>
+          <input type="file" id="calibration-file" accept=".json" hidden>
+        </form>
+      </section>
+      <div class="workspace">
+        <section class="panel map-panel" aria-labelledby="map-title">
+          <header class="panel-heading"><div><h2 id="map-title">七沟场地</h2><p id="map-note"></p></div><span id="lane-label" class="pill"></span></header>
+          <canvas id="map" role="img" aria-label="场地俯视轨迹、垄沟和回放位置"></canvas>
+          <div class="legend"><span><i class="line plan"></i>名义路线</span><span><i class="line"></i>试跑 A</span><span><i class="line compare"></i>试跑 B</span></div>
+        </section>
+        <section class="panel charts-panel" aria-labelledby="charts-title">
+          <header class="panel-heading"><div><h2 id="charts-title">速度与航向</h2><p id="chart-mode"></p></div><output id="cursor-time">0.00 s</output></header>
+          <div class="signal">
+            <div class="signal-label"><h3>平移速度 <small>m/s</small></h3><output id="speed-readout"></output></div>
+            <canvas id="speed-chart" aria-label="速度时间曲线，点击或拖动定位" role="img"></canvas>
+          </div>
+          <div class="signal">
+            <div class="signal-label"><h3>航向 <small>°</small></h3><output id="yaw-readout"></output></div>
+            <canvas id="yaw-chart" aria-label="航向时间曲线，点击或拖动定位" role="img"></canvas>
+          </div>
+          <div class="legend signal-legend"><span><i class="line"></i>A 实测或估计</span><span><i class="line command"></i>A 指令或参考</span><span><i class="line compare"></i>B 实测或估计</span></div>
+        </section>
+      </div>
+      <section class="panel transport" aria-label="共享回放时间轴">
+        <button type="button" id="play">播放</button>
+        <input id="timeline" type="range" min="0" max="1" step=".01" value="0" aria-label="回放时间">
+        <label><span class="visually-hidden">播放倍速</span><select id="rate"><option value=".5">0.5×</option><option value="1" selected>1×</option><option value="2">2×</option><option value="4">4×</option></select></label>
+        <output id="duration"></output>
+      </section>
+      <div class="workspace detail-workspace">
+        <section class="panel detail-panel">
+          <h2>A/B 对比</h2>
+          <div class="compare-controls">
+            <p>两趟独立计量，缺失项用「—」标记。</p>
+            <label for="compare-align">回放对齐</label>
+            <select id="compare-align"><option value="">各趟起点</option></select>
+          </div>
+          <div class="scroll-table"><table><thead><tr><th scope="col">指标</th><th scope="col">A</th><th scope="col">B</th><th scope="col">B − A</th></tr></thead><tbody id="metrics"></tbody></table></div>
+        </section>
+        <section class="panel detail-panel">
+          <h2>本趟事件</h2>
+          <p id="events-note"></p><ol id="events"></ol>
+        </section>
+      </div>
+      <section class="panel detail-panel health">
+        <h2>日志字段与缺口</h2>
+        <ul id="field-status"></ul><ul id="warnings"></ul>
+      </section>
+    </section>
+    <section id="tuning-view" hidden aria-label="参数草案">
+      <div class="intro"><div><h1>参数草案</h1><p>编辑试跑参数并导出带基线版本的 JSON，供台架与下一轮 A/B 复核。</p></div></div>
+      <div class="panel detail-panel" id="tuning"></div>
+    </section>
+    <section id="calibration-view" hidden aria-label="实测标定">
+      <div class="intro"><div><h1>实测标定</h1><p>逐轮记录方向、机械零位、有效轮径，再验证 IMU、场地和传感器坐标。</p></div></div>
+      <div id="calibration"></div>
+    </section>
+  </main>
+  <noscript>工作台需要启用 JavaScript。</noscript>
+</body>
+</html>
