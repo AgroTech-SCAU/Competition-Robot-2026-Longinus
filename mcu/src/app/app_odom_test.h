@@ -10,6 +10,9 @@ typedef struct {
     float y;
     unsigned int mask;
     unsigned int segment;
+    unsigned int track_mask;
+    unsigned int jump_mask;
+    float correction_mps;
 } AppLaserFix;
 
 AppLaserFix app_odom_test_get_laser_fix(void);

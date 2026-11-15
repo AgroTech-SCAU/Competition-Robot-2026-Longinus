@@ -18,7 +18,7 @@
 #define APP_RUNTIME_STARTUP_TIMEOUT_MS 3000u
 #define APP_RUNTIME_STOP_RETRY_MS 100u
 
-static bool s_manual_waiting_ready = false;
+static bool s_waiting_ready = false;
 static bool s_motor_starting = false;
 static ms_t s_motor_start_since_ms = 0u;
 static bool s_stop_requested = false;
@@ -35,7 +35,7 @@ static void app_runtime_raise_fault(AppFaultSource source, int32_t code);
 static void app_runtime_stop(bool force);
 
 void app_runtime_init(void) {
-    s_manual_waiting_ready = false;
+    s_waiting_ready = false;
     s_motor_starting = false;
     s_motor_start_since_ms = 0u;
     s_stop_requested = false;
@@ -92,8 +92,7 @@ void app_runtime_process(void) {
             stopped_for_switch = true;
         }
         if(app_fsm_get_state() == APP_FSM_STATE_IDLE || app_fsm_get_state() == APP_FSM_STATE_MANUAL) {
-            s_motor_starting = true;
-            s_motor_start_since_ms = delay_now_ms();
+            s_waiting_ready = true;
             (void)app_fsm_post(APP_FSM_EVENT_SWITCH_TO_AUTO);
             if(stopped_for_switch) {
                 app_fsm_process();
@@ -118,7 +117,7 @@ void app_runtime_process(void) {
         if(app_fsm_get_state() == APP_FSM_STATE_IDLE) {
             app_runtime_stop(false);
             if(s_stop_retry_pending) return;
-            s_manual_waiting_ready = true;
+            s_waiting_ready = true;
             (void)app_fsm_post(APP_FSM_EVENT_SWITCH_TO_MANUAL);
             if(stopped_for_switch) {
                 app_fsm_process();
@@ -144,16 +143,16 @@ void app_runtime_process(void) {
        zero-target preparation after IMU calibration; require full odometry
        before leaving that preparation or applying any driving command. */
     const Odom* estimate = odom.get_state();
-    if(manual_mode && s_manual_waiting_ready) {
-        /* A two-position SWD selects Manual by level. Calibration and centering
-           may take any time with output disabled; only motor preparation has
-           the bounded startup timeout. */
-        if(!estimate->imu_ready || !estimate->timing_valid || !app_runtime_sticks_centered()) {
+    if(s_waiting_ready) {
+        /* Calibration can complete with output disabled in either mode.
+           The preparation timeout starts when the IMU and timing are ready. */
+        if(!estimate->imu_ready || !estimate->timing_valid ||
+           (manual_mode && !app_runtime_sticks_centered())) {
             status = chassis_poll_feedback();
             if(status != CHASSIS_OK) app_runtime_raise_fault(APP_FAULT_SOURCE_CHASSIS, status);
             return;
         }
-        s_manual_waiting_ready = false;
+        s_waiting_ready = false;
         s_motor_starting = true;
         s_motor_start_since_ms = delay_now_ms();
     }
@@ -258,7 +257,7 @@ static void app_runtime_stop(bool force) {
     ChassisErrorCode status;
 
     app_odom_test_reset();
-    s_manual_waiting_ready = false;
+    s_waiting_ready = false;
     s_motor_starting = false;
     if(s_stop_attempted_this_cycle) return;
     if(!force && s_stop_requested &&
@@ -299,4 +298,13 @@ static void app_runtime_raise_fault(AppFaultSource source, int32_t code) {
         app_fsm_process();
     }
     app_runtime_stop(new_fault);
+    if(new_fault && source == APP_FAULT_SOURCE_ODOM && code == 1) {
+        log_warn("ODOM SNAP prep=%u cal=%u imu=%u tim=%u fus=%u wh=%u age_ms=%lu dt_ms=%.1f gap=%lu",
+                 s_odom_fault_was_starting ? 1u : 0u, s_odom_fault_snapshot.imu_calibrated ? 1u : 0u,
+                 s_odom_fault_snapshot.imu_ready ? 1u : 0u, s_odom_fault_snapshot.timing_valid ? 1u : 0u,
+                 s_odom_fault_snapshot.fusion_ready ? 1u : 0u, s_odom_fault_snapshot.wheel_valid ? 1u : 0u,
+                 (unsigned long)s_odom_fault_snapshot.wheel_age_ms,
+                 (double)s_odom_fault_snapshot.process_dt_s * 1000.0,
+                 (unsigned long)s_odom_fault_snapshot.discontinuity_count);
+    }
 }

@@ -3,6 +3,7 @@
 #include "app_odom_test.h"
 #include "chassis.h"
 #include "delay.h"
+#include "laser_field.h"
 #include "laser_odom.h"
 #include "log.h"
 #include "odom.h"
@@ -86,12 +87,16 @@ void assemble_log_laser(void) {
     if(!laser_odom_is_online()) return;
 
     const AppLaserFix fix = app_odom_test_get_laser_fix();
+    LaserFieldEstimate field = { .x_m = NAN, .y_m = NAN, .furrow = -1 };
+    (void)laser_field_get_estimate(&field);
     s_nonblocking_requested = true;
-    log_info("LASER POS seg=%u frame=%lu F=%u B=%u L=%u R=%u mm x=%.3f y=%.3f m fix=0x%X",
+    log_info("LASER POS seg=%u frame=%lu F=%u B=%u L=%u R=%u mm x=%.3f y=%.3f m fix=0x%X field=(%.3f,%.3f) furrow=%d q=0x%lX track=0x%X jump=0x%X corr=%.3f",
              fix.segment, (unsigned long)sample->received,
              (unsigned int)sample->distance_mm[LASER_FRONT], (unsigned int)sample->distance_mm[LASER_REAR],
              (unsigned int)sample->distance_mm[LASER_LEFT], (unsigned int)sample->distance_mm[LASER_RIGHT],
              (double)((fix.mask & APP_LASER_X) ? fix.x : NAN),
-             (double)((fix.mask & APP_LASER_Y) ? fix.y : NAN), fix.mask);
+             (double)((fix.mask & APP_LASER_Y) ? fix.y : NAN), fix.mask,
+             (double)field.x_m, (double)field.y_m, field.furrow, (unsigned long)field.quality,
+             fix.track_mask, fix.jump_mask, (double)fix.correction_mps);
     s_nonblocking_requested = false;
 }
