@@ -15,8 +15,10 @@ typedef struct {
     float x_m;
     float y_m;
     float speed_mps;
-    LaserBeam control_beam; /* Bidirectional 65 mm lateral target. */
-    bool furrow_gate;       /* Front+rear=100..140 mm; also enables rear escape. */
+    LaserBeam control_beam; /* Travel target; FRONT+REAR are combined when gated. */
+    LaserBeam settle_beam;  /* NO_BEAM reuses control_beam; leg 15 overrides to LEFT. */
+    bool furrow_gate;       /* Front+rear=50..125 mm enables dual-axis centering. */
+    bool rear_escape;       /* Rear 30 mm protection only on 05/07/.../15. */
 } MapRouteLeg;
 
 extern const MapRouteLeg map_route[];

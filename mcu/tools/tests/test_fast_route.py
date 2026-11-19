@@ -31,7 +31,9 @@ class Leg:
     y: float
     speed: float
     control: str
+    settle: str
     gate: bool
+    rear_escape: bool
 
 
 def parse_route() -> list[Leg]:
@@ -50,56 +52,133 @@ def parse_route() -> list[Leg]:
         cross = re.match(r"CROSS\((WEST|EAST),\s*(\d+),\s*(true|false)\)", line)
         connect = re.match(r"CONNECT\((WEST|EAST),\s*(\d+),\s*(LASER_\w+)\)", line)
         if cross:
-            x_name, row, gate = cross.groups()
+            x_name, row, rear_escape = cross.groups()
             legs.append(Leg(west if x_name == "WEST" else east,
                             0.2 + 0.7 * (int(row) - 1), speeds["ROUTE_CROSS_SPEED_MPS"],
-                            "LASER_FRONT", gate == "true"))
+                            "LASER_FRONT", "LASER_NO_BEAM", True, rear_escape == "true"))
         elif connect:
             x_name, row, side = connect.groups()
             legs.append(Leg(west if x_name == "WEST" else east,
                             0.2 + 0.7 * (int(row) - 1), speeds["ROUTE_CONNECT_SPEED_MPS"],
-                            side, False))
+                            side, "LASER_NO_BEAM", False, False))
         elif line.startswith("{ WEST, ROW(7), ROUTE_START_SPEED_MPS"):
-            legs.append(Leg(west, 4.4, speeds["ROUTE_START_SPEED_MPS"], "LASER_LEFT", False))
+            legs.append(Leg(west, 4.4, speeds["ROUTE_START_SPEED_MPS"],
+                            "LASER_LEFT", "LASER_NO_BEAM", False, False))
+        elif line.startswith("{ WEST, ROW(1), ROUTE_CROSS_SPEED_MPS"):
+            legs.append(Leg(west, 0.2, speeds["ROUTE_CROSS_SPEED_MPS"],
+                            "LASER_FRONT", "LASER_LEFT", True, True))
         elif line.startswith("{ WEST, MAP_START_Y_M, ROUTE_RETURN_SPEED_MPS"):
-            legs.append(Leg(west, -0.5, speeds["ROUTE_RETURN_SPEED_MPS"], "LASER_NO_BEAM", False))
+            legs.append(Leg(west, -0.5, speeds["ROUTE_RETURN_SPEED_MPS"],
+                            "LASER_NO_BEAM", "LASER_NO_BEAM", False, False))
     return legs
 
 
 def check_route(legs: list[Leg]) -> float:
     assert len(legs) == 16, f"expected 16 legs, got {len(legs)}"
-    controls = ["LEFT", "FRONT", "FRONT", "LEFT", "FRONT", "RIGHT", "FRONT", "LEFT",
-                "FRONT", "RIGHT", "FRONT", "LEFT", "FRONT", "RIGHT", "FRONT", "NO_BEAM"]
-    gated = {5, 7, 9, 11, 13, 15}
+    expected = [
+        (0.2, 4.4, 0.50, "LEFT"),
+        (2.8, 4.4, 0.45, "FRONT"),
+        (0.2, 4.4, 0.45, "FRONT"),
+        (0.2, 3.7, 0.32, "LEFT"),
+        (2.8, 3.7, 0.45, "FRONT"),
+        (2.8, 3.0, 0.32, "RIGHT"),
+        (0.2, 3.0, 0.45, "FRONT"),
+        (0.2, 2.3, 0.32, "LEFT"),
+        (2.8, 2.3, 0.45, "FRONT"),
+        (2.8, 1.6, 0.32, "RIGHT"),
+        (0.2, 1.6, 0.45, "FRONT"),
+        (0.2, 0.9, 0.32, "LEFT"),
+        (2.8, 0.9, 0.45, "FRONT"),
+        (2.8, 0.2, 0.32, "RIGHT"),
+        (0.2, 0.2, 0.45, "FRONT"),
+        (0.2, -0.5, 0.45, "NO_BEAM"),
+    ]
+    gated = {2, 3, 5, 7, 9, 11, 13, 15}
+    rear_protected = {5, 7, 9, 11, 13, 15}
     previous = (0.2, -0.5)
     total = 0.0
-    for number, (leg, control) in enumerate(zip(legs, controls), 1):
+    for number, (leg, target) in enumerate(zip(legs, expected), 1):
+        x, y, speed, control = target
+        assert math.isclose(leg.x, x) and math.isclose(leg.y, y), f"leg {number} coordinate"
+        assert math.isclose(leg.speed, speed), f"leg {number} speed={leg.speed}"
         assert leg.control == f"LASER_{control}", f"leg {number} control={leg.control}"
         assert leg.gate == (number in gated), f"leg {number} gate={leg.gate}"
-        assert leg.control != "LASER_REAR"
+        assert leg.rear_escape == (number in rear_protected), f"leg {number} rear escape"
+        expected_settle = "LASER_LEFT" if number == 15 else "LASER_NO_BEAM"
+        assert leg.settle == expected_settle, f"leg {number} settle={leg.settle}"
+        assert leg.control != "LASER_REAR" and leg.settle != "LASER_REAR"
         dx, dy = leg.x - previous[0], leg.y - previous[1]
         dx = 0.0 if abs(dx) < 1e-6 else dx
         dy = 0.0 if abs(dy) < 1e-6 else dy
         assert (dx != 0.0) ^ (dy != 0.0), f"leg {number} is not axis-aligned"
-        assert leg.speed > 0.0 and math.isfinite(leg.speed)
         total += abs(dx) + abs(dy)
         previous = (leg.x, leg.y)
     assert previous == (0.2, -0.5)
+    assert math.isclose(total, 30.6)
     return total
+
+
+def target_error(raw: float, target: float) -> float:
+    error = raw - target
+    deadband = numeric_define(CONTROL_SOURCE, "LASER_CONTROL_DEADBAND_MM")
+    if abs(error) <= deadband:
+        return 0.0
+    return error - math.copysign(deadband, error)
+
+
+def dual_correction(front: float, rear: float) -> float:
+    """Route vx correction with independent FRONT=70 and REAR=45 targets."""
+    front_target = numeric_define(CONTROL_SOURCE, "LASER_FRONT_TARGET_MM")
+    rear_target = numeric_define(CONTROL_SOURCE, "LASER_REAR_TARGET_MM")
+    return 0.5 * (target_error(rear, rear_target) -
+                  target_error(front, front_target)) * 0.001
+
+
+def dual_aligned(front: float, rear: float) -> bool:
+    front_target = numeric_define(CONTROL_SOURCE, "LASER_FRONT_TARGET_MM")
+    rear_target = numeric_define(CONTROL_SOURCE, "LASER_REAR_TARGET_MM")
+    tolerance = numeric_define(CONTROL_SOURCE, "LASER_DUAL_TOLERANCE_MM")
+    gate_min = numeric_define(CONTROL_SOURCE, "LASER_FURROW_SUM_MIN_MM")
+    gate_max = numeric_define(CONTROL_SOURCE, "LASER_FURROW_SUM_MAX_MM")
+    return (gate_min <= front + rear <= gate_max and
+            abs(front - front_target) <= tolerance and
+            abs(rear - rear_target) <= tolerance)
+
+
+def side_aligned(raw: float) -> bool:
+    target = numeric_define(CONTROL_SOURCE, "LASER_SIDE_TARGET_MM")
+    tolerance = numeric_define(CONTROL_SOURCE, "LASER_SIDE_TOLERANCE_MM")
+    return abs(raw - target) <= tolerance
 
 
 def check_control_contract() -> None:
     assert numeric_define(LASER_HEADER, "LASER_MIN_RANGE_MM") == 0
     assert numeric_define(LASER_HEADER, "LASER_MAX_RANGE_MM") == 5000
-    assert numeric_define(CONTROL_SOURCE, "LASER_TARGET_MM") == 65
-    assert numeric_define(CONTROL_SOURCE, "LASER_TARGET_TOLERANCE_MM") == 8
-    assert numeric_define(CONTROL_SOURCE, "LASER_SAFETY_MM") == 55
+    assert numeric_define(CONTROL_SOURCE, "LASER_SIDE_TARGET_MM") == 45
+    assert numeric_define(CONTROL_SOURCE, "LASER_FRONT_TARGET_MM") == 70
+    assert numeric_define(CONTROL_SOURCE, "LASER_REAR_TARGET_MM") == 45
+    assert "LASER_DUAL_TARGET_MM" not in CONTROL_SOURCE
+    assert numeric_define(CONTROL_SOURCE, "LASER_DUAL_TOLERANCE_MM") == 3
+    assert numeric_define(CONTROL_SOURCE, "LASER_SIDE_TOLERANCE_MM") == 8
+    assert "LASER_TARGET_TOLERANCE_MM" not in CONTROL_SOURCE
+    assert numeric_define(CONTROL_SOURCE, "LASER_CONTROL_DEADBAND_MM") == 3
+    assert numeric_define(CONTROL_SOURCE, "LASER_START_ACQUIRE_MM") == 105
+    assert numeric_define(CONTROL_SOURCE, "LASER_FRONT_SAFETY_MM") == 55
+    assert numeric_define(CONTROL_SOURCE, "LASER_SAFETY_MM") == 30
+    assert numeric_define(CONTROL_SOURCE, "LASER_FURROW_SUM_MIN_MM") == 50
+    assert numeric_define(CONTROL_SOURCE, "LASER_FURROW_SUM_MAX_MM") == 125
+    assert "50..125" in ROUTE_HEADER and "50..125" in ROUTE_SOURCE
+    for obsolete in ("75..125", "75..115", "100..140", "target=50", "LEFT=50"):
+        assert obsolete not in ROUTE_HEADER + ROUTE_SOURCE + CONTROL_SOURCE
+    assert "guidance_acquired = true" in CONTROL_SOURCE
+    assert "segment_index == 0u && !s_odom_test.guidance_acquired" in CONTROL_SOURCE
+    assert "MAP ACQUIRE seg=1 LEFT" in CONTROL_SOURCE
     assert "MAP SPEED seg=%u phase=%s" in CONTROL_SOURCE
     assert "ROUTE_SPEED_ACCEL" in CONTROL_SOURCE and "ROUTE_SPEED_DECEL" in CONTROL_SOURCE
-    assert "MAP ALIGN seg=%u beam=%u raw=%u target=65" in CONTROL_SOURCE
+    assert "MAP ALIGN seg=%u beam=%u raw=%u target=45" in CONTROL_SOURCE
+    assert "MAP ALIGN DUAL seg=%u F=%u B=%u target=70/45" in CONTROL_SOURCE
+    assert "MAP ALIGN WAIT" in CONTROL_SOURCE
     assert "MAP ALIGN SKIP" in CONTROL_SOURCE and "MAP ALIGNED" in CONTROL_SOURCE
-    assert numeric_define(CONTROL_SOURCE, "LASER_FURROW_SUM_MIN_MM") == 100
-    assert numeric_define(CONTROL_SOURCE, "LASER_FURROW_SUM_MAX_MM") == 140
     assert numeric_define(CONTROL_SOURCE, "ROUTE_END_TOLERANCE_M") == 0.005
     assert numeric_define(CONTROL_SOURCE, "ROUTE_ACCEL_DISTANCE_M") == 0.400
     assert numeric_define(CONTROL_SOURCE, "ROUTE_DECEL_DISTANCE_M") == 0.400
@@ -110,7 +189,6 @@ def check_control_contract() -> None:
     assert "fminf(accel_speed, braking_speed)" in CONTROL_SOURCE
     assert "MAP PROFILE seg=%u accel_d=%.3f decel_d=%.3f" in CONTROL_SOURCE
     assert "MAP FINAL APPROACH seg=1" in CONTROL_SOURCE
-    assert "MAP ALIGN WAIT" in CONTROL_SOURCE
     assert "APP_ODOM_TEST_SETTLE_TIMEOUT_MS" not in CONTROL_SOURCE
     assert re.search(r"config\.wheel_only\s*=\s*true\s*;", ODOM_ASSEMBLY)
     assert not re.search(r"^\s*assemble_imu\s*\(\s*\)\s*;", ENTRY_SOURCE, re.M)
@@ -119,7 +197,24 @@ def check_control_contract() -> None:
     assert re.search(r"chassis\.set_velocity\([^;]+,\s*0\.0f\)", CONTROL_SOURCE)
     assert "route_furrow_gate" in CONTROL_SOURCE
     assert "route_safety_escape" in CONTROL_SOURCE
-    assert "leg->furrow_gate && route_laser_valid(sample, LASER_REAR" in CONTROL_SOURCE
+    assert "leg->rear_escape && route_laser_valid(sample, LASER_REAR" in CONTROL_SOURCE
+    assert re.search(r"route_lateral_target\(leg,\s*sample,\s*test_vy,\s*"
+                     r"leg->control_beam,\s*now\)", CONTROL_SOURCE)
+    assert "route_lateral_target(leg, sample, test_vy, beam, now)" in CONTROL_SOURCE
+    assert "0.5f * (rear_error - front_error)" in CONTROL_SOURCE
+    assert "leg->settle_beam == LASER_NO_BEAM ? leg->control_beam : leg->settle_beam" in CONTROL_SOURCE
+    assert "s_odom_test.segment_index == 14u" in CONTROL_SOURCE
+    assert "alignment_mandatory" in CONTROL_SOURCE
+    correction_axis = re.compile(
+        r"const bool correction_vx = leg->settle_beam == LASER_NO_BEAM\s*\?\s*test_vy\s*:\s*"
+        r"\(beam == LASER_FRONT \|\| beam == LASER_REAR\);"
+    )
+    assert len(correction_axis.findall(CONTROL_SOURCE)) == 2
+    assert "const float vx_route = correction_vx ? s_odom_test.correction_mps : 0.0f" in CONTROL_SOURCE
+    assert "const float vy_route = correction_vx ? 0.0f : s_odom_test.correction_mps" in CONTROL_SOURCE
+    # Leg 15 is a vy crossing, and its LEFT settle correction remains vy.
+    left_correction = -target_error(100.0, 45.0) * 0.001
+    assert left_correction < 0.0
 
     # Removed dangerous endpoint behavior must stay removed.
     for forbidden in (
@@ -131,35 +226,55 @@ def check_control_contract() -> None:
     assert "route_braking_speed(remaining)" in CONTROL_SOURCE
     assert "if(index == 0u)" in CONTROL_SOURCE
     assert "sample->distance_mm[LASER_FRONT] <=" in CONTROL_SOURCE
+    assert CONTROL_SOURCE.count("LASER_FRONT_TARGET_MM + LASER_DUAL_TOLERANCE_MM") == 2
     assert "endpoint_ready = remaining <= ROUTE_END_TOLERANCE_M" in CONTROL_SOURCE
 
-    # Raw >65 moves toward the wall; raw <65 moves away. Only vx/vy are used.
-    target = 65.0
-    for raw in (0.0, 40.0, 65.0, 100.0, 5000.0):
-        error = raw - target
-        if abs(error) <= 3.0:
-            error = 0.0
-        else:
-            error -= math.copysign(3.0, error)
-        front_vx = -error
+    # Side control approaches distant walls and escapes close walls; target=45 mm.
+    for raw in (0.0, 30.0, 40.0, 45.0, 50.0, 65.0, 100.0, 5000.0):
+        error = target_error(raw, 45.0)
         left_vy = -error
         right_vy = error
-        if raw > 65:
-            assert front_vx < 0 and left_vy < 0 and right_vy > 0
-        elif raw < 65:
-            assert front_vx > 0 and left_vy > 0 and right_vy < 0
+        if raw > 48:
+            assert left_vy < 0 and right_vy > 0
+        elif raw < 42:
+            assert left_vy > 0 and right_vy < 0
         else:
-            assert front_vx == left_vy == right_vy == 0
+            assert left_vy == right_vy == 0
+    assert side_aligned(37) and side_aligned(45) and side_aligned(53)
+    assert not side_aligned(36.9) and not side_aligned(53.1)
 
-    # Independent 55 mm escape model: zero is valid and commands away from walls.
+    # Dual settle tolerance is +/-3 mm: FRONT=67..73 and REAR=42..48.
+    assert dual_correction(70, 45) == 0.0
+    assert dual_correction(60, 50) > 0.0
+    assert dual_correction(80, 40) < 0.0
+    assert math.isclose(dual_correction(80, 40), -dual_correction(60, 50))
+    assert target_error(67, 70) == 0.0 and target_error(73, 70) == 0.0
+    assert target_error(42, 45) == 0.0 and target_error(48, 45) == 0.0
+    assert dual_aligned(70, 45)
+    assert dual_aligned(67, 42)
+    assert dual_aligned(73, 48)
+    assert not dual_aligned(66.9, 45)
+    assert not dual_aligned(70, 48.1)
+    assert not dual_aligned(20, 30)  # Sum=50 opens the gate, but targets are wrong.
+
+    # FRONT escapes below 55 mm; LEFT/RIGHT/REAR escape below 30 mm.
+    assert CONTROL_SOURCE.count("LASER_FRONT_SAFETY_MM") >= 3
     for raw in (0.0, 30.0, 54.0):
-        escape = min(0.12, 4.0 * (55.0 - raw) * 0.001)
-        assert escape > 0.0
-        assert escape <= 0.12
-        front_vx, left_vy, right_vy, rear_vx = escape, escape, -escape, -escape
-        assert front_vx > 0 and left_vy > 0 and right_vy < 0 and rear_vx < 0
-    for raw in (55.0, 65.0, 5000.0):
-        assert raw >= 55.0  # no safety escape outside the protected range
+        front_escape = min(0.12, 4.0 * (55.0 - raw) * 0.001)
+        assert 0.0 < front_escape <= 0.12
+    for raw in (55.0, 70.0, 5000.0):
+        assert raw >= 55.0  # no front safety escape outside the protected range
+    for raw in (0.0, 20.0, 29.0):
+        escape = min(0.12, 4.0 * (30.0 - raw) * 0.001)
+        assert 0.0 < escape <= 0.12
+        left_vy, right_vy, rear_vx = escape, -escape, -escape
+        assert left_vy > 0 and right_vy < 0 and rear_vx < 0
+    for raw in (30.0, 45.0, 5000.0):
+        assert raw >= 30.0  # no side/rear safety escape outside the protected range
+    assert numeric_define(CONTROL_SOURCE, "LASER_FRONT_SAFETY_MM") < numeric_define(
+        CONTROL_SOURCE, "LASER_FRONT_TARGET_MM")
+    assert numeric_define(CONTROL_SOURCE, "LASER_SAFETY_MM") < numeric_define(
+        CONTROL_SOURCE, "LASER_REAR_TARGET_MM")
 
 
 def ideal_leg_time(distance: float, speed_limit: float) -> float:
@@ -207,9 +322,13 @@ def main() -> None:
         leg_distance = math.hypot(leg.x - previous[0], leg.y - previous[1])
         motion_time += ideal_leg_time(leg_distance, leg.speed)
         previous = (leg.x, leg.y)
-    print(f"PASS: 16 legs, route {distance:.3f} m; 01 immediate front endpoint, 02..16 wheel endpoints")
-    print("PASS: raw 0..5000 mm; bidirectional 65 mm control; independent front/left/right 55 mm escape")
-    print("PASS: rear 55 mm escape and 100..140 mm gate only on 05/07/09/11/13/15")
+    print(f"PASS: 16 legs, route {distance:.3f} m; 01 front endpoint, 02..16 wheel endpoints")
+    print("PASS: eight crossings use FRONT=70 mm and REAR=45 mm inside the 50..125 mm gate")
+    print("PASS: dual settle FRONT=67..73 mm and REAR=42..48 mm")
+    print("PASS: LEFT/RIGHT target=45 mm; 01 acquire=105 mm and front endpoint=73 mm")
+    print("PASS: raw 0..5000 mm; FRONT escape=55 mm; LEFT/RIGHT escape=30 mm")
+    print("PASS: rear 30 mm escape only on 05/07/09/11/13/15; 02/03 rear escape disabled")
+    print("PASS: leg 15 requires LEFT=45+/-8 mm before leg 16; leg 16 has no target guidance")
     print(f"PASS: 16 wheel-odometry trapezoids, ideal motion {motion_time:.2f} s plus settling")
     print("PASS: each segment stops and settles before switching; Auto wz=0")
     print("Scope: source/model checks only; no firmware build or on-car validation")
