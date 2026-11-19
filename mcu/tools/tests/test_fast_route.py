@@ -101,7 +101,17 @@ def check_control_contract() -> None:
     assert numeric_define(CONTROL_SOURCE, "LASER_FURROW_SUM_MIN_MM") == 100
     assert numeric_define(CONTROL_SOURCE, "LASER_FURROW_SUM_MAX_MM") == 140
     assert numeric_define(CONTROL_SOURCE, "ROUTE_END_TOLERANCE_M") == 0.005
+    assert numeric_define(CONTROL_SOURCE, "ROUTE_ACCEL_DISTANCE_M") == 0.400
+    assert numeric_define(CONTROL_SOURCE, "ROUTE_DECEL_DISTANCE_M") == 0.400
     assert numeric_define(CONTROL_SOURCE, "APP_ODOM_TEST_SETTLE_READY_MS") == 100
+    assert numeric_define(CONTROL_SOURCE, "LASER_CORRECTION_LIMIT_MPS") == 0.06
+    assert numeric_define(CONTROL_SOURCE, "ROUTE01_FINAL_APPROACH_MPS") == 0.04
+    assert "route_acceleration_speed(progress_m)" in CONTROL_SOURCE
+    assert "fminf(accel_speed, braking_speed)" in CONTROL_SOURCE
+    assert "MAP PROFILE seg=%u accel_d=%.3f decel_d=%.3f" in CONTROL_SOURCE
+    assert "MAP FINAL APPROACH seg=1" in CONTROL_SOURCE
+    assert "MAP ALIGN WAIT" in CONTROL_SOURCE
+    assert "APP_ODOM_TEST_SETTLE_TIMEOUT_MS" not in CONTROL_SOURCE
     assert re.search(r"config\.wheel_only\s*=\s*true\s*;", ODOM_ASSEMBLY)
     assert not re.search(r"^\s*assemble_imu\s*\(\s*\)\s*;", ENTRY_SOURCE, re.M)
     assert "chassis_yaw_hold" not in CONTROL_SOURCE
@@ -153,15 +163,37 @@ def check_control_contract() -> None:
 
 
 def ideal_leg_time(distance: float, speed_limit: float) -> float:
-    accel = numeric_define(CONTROL_SOURCE, "APP_ODOM_TEST_ACCEL_MPS2")
-    decel = numeric_define(CONTROL_SOURCE, "APP_ODOM_TEST_DECEL_MPS2")
-    peak = min(speed_limit, math.sqrt(accel * decel * distance / (accel + decel)))
-    accel_distance = peak * peak / (2.0 * accel)
-    braking_distance = peak * peak / (2.0 * decel)
+    accel_distance = min(numeric_define(CONTROL_SOURCE, "ROUTE_ACCEL_DISTANCE_M"), 0.5 * distance)
+    braking_distance = min(numeric_define(CONTROL_SOURCE, "ROUTE_DECEL_DISTANCE_M"), 0.5 * distance)
+    accel = speed_limit * speed_limit / (2.0 * accel_distance)
+    decel = speed_limit * speed_limit / (2.0 * braking_distance)
+    assert math.isclose(speed_limit * speed_limit / (2.0 * accel), accel_distance)
+    assert math.isclose(speed_limit * speed_limit / (2.0 * decel), braking_distance)
     assert accel_distance + braking_distance <= distance + 1e-6
+    if distance >= 0.8:
+        assert accel_distance == 0.4 and braking_distance == 0.4
+    else:
+        assert accel_distance == braking_distance == 0.5 * distance
     cruise_distance = max(0.0, distance - accel_distance - braking_distance)
-    elapsed = peak / accel + cruise_distance / peak + peak / decel
+    elapsed = speed_limit / accel + cruise_distance / speed_limit + speed_limit / decel
     assert math.isfinite(elapsed) and elapsed > 0.0
+
+    # Replay the actual 2 ms position caps and rate limiter. The start floor
+    # prevents the zero-position sqrt cap from locking the vehicle at zero.
+    dt = numeric_define(CONTROL_SOURCE, "APP_ODOM_TEST_CONTROL_PERIOD_S")
+    start_speed = numeric_define(CONTROL_SOURCE, "ROUTE_PROFILE_START_SPEED_MPS")
+    progress = speed = 0.0
+    steps = 0
+    while distance - progress > numeric_define(CONTROL_SOURCE, "ROUTE_END_TOLERANCE_M"):
+        accel_cap = max(start_speed, math.sqrt(2.0 * accel * max(0.0, progress)))
+        decel_cap = math.sqrt(2.0 * decel * max(0.0, distance - progress))
+        target = min(speed_limit, accel_cap, decel_cap)
+        speed = min(target, speed + accel * dt) if speed < target else max(target, speed - decel * dt)
+        progress += speed * dt
+        steps += 1
+        assert steps < 20000 and math.isfinite(speed)
+    tolerance = numeric_define(CONTROL_SOURCE, "ROUTE_END_TOLERANCE_M")
+    assert -tolerance <= progress - distance <= tolerance + 1e-9
     return elapsed
 
 

@@ -35,7 +35,7 @@
             "editor.tabSize": 4,
             "editor.autoIndent": "advanced"
         },
-        "emberprobe.openocdPath": "c:\\Users\\11093\\AppData\\Roaming\\Code\\User\\globalStorage\\bakesheep.emberprobe\\emberprobe\\openocd\\bin\\openocd.exe"
+        "emberprobe.openocdPath": "g:\\Work\\match\\two\\2026 Agri Equipment Competition Category B\\code\\stm32\\Competition-Robot-2026-Longinus\\mcu\\build\\OpenOCD\\xpack-openocd-0.12.0-7\\xpack-openocd-0.12.0-7\\bin\\openocd.exe"
     },
     "extensions": {
         "recommendations": [

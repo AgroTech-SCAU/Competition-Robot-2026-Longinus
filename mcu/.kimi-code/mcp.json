@@ -1,0 +1,13 @@
+{
+  "mcpServers": {
+    "emberprobe": {
+      "command": "G:\\vscode\\install\\VSCode-win32-x64-1.116.0\\Code.exe",
+      "args": [
+        "C:\\Users\\30609\\AppData\\Roaming\\Code\\User\\globalStorage\\bakesheep.emberprobe\\mcp\\emberprobe-mcp.js"
+      ],
+      "env": {
+        "ELECTRON_RUN_AS_NODE": "1"
+      }
+    }
+  }
+}

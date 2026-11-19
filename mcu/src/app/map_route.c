@@ -3,10 +3,10 @@
 #define WEST 0.20f
 #define EAST 2.80f
 #define ROW(n) (0.20f + 0.70f * ((n) - 1))
-#define ROUTE_START_SPEED_MPS 0.35f
-#define ROUTE_CROSS_SPEED_MPS 0.30f
-#define ROUTE_CONNECT_SPEED_MPS 0.25f
-#define ROUTE_RETURN_SPEED_MPS 0.30f
+#define ROUTE_START_SPEED_MPS 0.50f
+#define ROUTE_CROSS_SPEED_MPS 0.45f
+#define ROUTE_CONNECT_SPEED_MPS 0.32f
+#define ROUTE_RETURN_SPEED_MPS 0.45f
 
 #define CROSS(x, row, gate) \
     { x, ROW(row), ROUTE_CROSS_SPEED_MPS, LASER_FRONT, gate }
