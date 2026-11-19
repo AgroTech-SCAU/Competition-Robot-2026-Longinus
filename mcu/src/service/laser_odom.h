@@ -4,8 +4,8 @@
 #include <stdbool.h>
 #include <stdint.h>
 
-#define LASER_MIN_RANGE_MM 70u
-#define LASER_MAX_RANGE_MM 7500u
+#define LASER_MIN_RANGE_MM 0u
+#define LASER_MAX_RANGE_MM 5000u
 
 typedef enum {
     LASER_FRONT,

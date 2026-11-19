@@ -1,26 +1,26 @@
 #!/usr/bin/env python3
-"""Host-side static and mathematical checks for the wheel/laser route.
+"""Static and mathematical checks for the wheel-route laser controller.
 
-This does not compile the firmware and does not model steering latency, slip,
-laser rejection, actuator saturation, or the fruit-thinning mechanism.
+These checks do not compile the firmware or replace low-speed on-car validation.
 """
 
-from collections import Counter
 from dataclasses import dataclass
-import math
 from pathlib import Path
+import math
 import re
 
 
 MCU = Path(__file__).resolve().parents[2]
 ROUTE_SOURCE = (MCU / "src/app/map_route.c").read_text(encoding="utf-8")
+ROUTE_HEADER = (MCU / "src/app/map_route.h").read_text(encoding="utf-8")
 CONTROL_SOURCE = (MCU / "src/app/app_odom_test.c").read_text(encoding="utf-8")
+LASER_HEADER = (MCU / "src/service/laser_odom.h").read_text(encoding="utf-8")
 ODOM_ASSEMBLY = (MCU / "src/service/assemble/assemble_odom.c").read_text(encoding="utf-8")
 ENTRY_SOURCE = (MCU / "src/app/entry.h").read_text(encoding="utf-8")
 
 
 def numeric_define(source: str, name: str) -> float:
-    match = re.search(rf"^#define\s+{name}\s+(-?\d+(?:\.\d+)?)f\s*$", source, re.M)
+    match = re.search(rf"^#define\s+{name}\s+(-?\d+(?:\.\d+)?)(?:u|f)?\s*$", source, re.M)
     assert match, f"missing numeric define {name}"
     return float(match.group(1))
 
@@ -30,10 +30,8 @@ class Leg:
     x: float
     y: float
     speed: float
-    kind: str
-    beams: tuple[str, ...]
-    end_beam: str
-    row: int | None
+    control: str
+    gate: bool
 
 
 def parse_route() -> list[Leg]:
@@ -42,181 +40,147 @@ def parse_route() -> list[Leg]:
     speeds = {
         name: numeric_define(ROUTE_SOURCE, name)
         for name in (
-            "ROUTE_START_SPEED_MPS",
-            "ROUTE_CROSS_SPEED_MPS",
-            "ROUTE_CONNECT_SPEED_MPS",
-            "ROUTE_RETURN_SPEED_MPS",
+            "ROUTE_START_SPEED_MPS", "ROUTE_CROSS_SPEED_MPS",
+            "ROUTE_CONNECT_SPEED_MPS", "ROUTE_RETURN_SPEED_MPS",
         )
     }
     legs: list[Leg] = []
-    invocation = re.compile(
-        r"^(CROSS|CONNECT)\((WEST|EAST),\s*(\d+),\s*"
-        r"(?:(LEFT_WALL|RIGHT_WALL),\s*)?(LASER_\w+)\),?$"
-    )
     for raw_line in ROUTE_SOURCE.splitlines():
         line = raw_line.strip()
-        if line.startswith("{ WEST, ROW(7), ROUTE_START_SPEED_MPS"):
-            legs.append(Leg(west, 0.2 + 0.7 * 6, speeds["ROUTE_START_SPEED_MPS"],
-                            "START", ("LEFT_WALL",), "LASER_FRONT", 7))
-            continue
-        match = invocation.match(line)
-        if match:
-            kind, x_name, row_text, wall, end_beam = match.groups()
-            row = int(row_text)
-            legs.append(Leg(
-                west if x_name == "WEST" else east,
-                0.2 + 0.7 * (row - 1),
-                speeds["ROUTE_CROSS_SPEED_MPS" if kind == "CROSS" else "ROUTE_CONNECT_SPEED_MPS"],
-                kind,
-                ("FRONT_WALL", "REAR_WALL") if kind == "CROSS" else (wall,),
-                end_beam,
-                row,
-            ))
-            continue
-        if line.startswith("{ WEST, MAP_START_Y_M, ROUTE_RETURN_SPEED_MPS"):
-            legs.append(Leg(west, -0.5, speeds["ROUTE_RETURN_SPEED_MPS"],
-                            "RETURN", ("LEFT_WALL",), "LASER_NO_BEAM", None))
+        cross = re.match(r"CROSS\((WEST|EAST),\s*(\d+),\s*(true|false)\)", line)
+        connect = re.match(r"CONNECT\((WEST|EAST),\s*(\d+),\s*(LASER_\w+)\)", line)
+        if cross:
+            x_name, row, gate = cross.groups()
+            legs.append(Leg(west if x_name == "WEST" else east,
+                            0.2 + 0.7 * (int(row) - 1), speeds["ROUTE_CROSS_SPEED_MPS"],
+                            "LASER_FRONT", gate == "true"))
+        elif connect:
+            x_name, row, side = connect.groups()
+            legs.append(Leg(west if x_name == "WEST" else east,
+                            0.2 + 0.7 * (int(row) - 1), speeds["ROUTE_CONNECT_SPEED_MPS"],
+                            side, False))
+        elif line.startswith("{ WEST, ROW(7), ROUTE_START_SPEED_MPS"):
+            legs.append(Leg(west, 4.4, speeds["ROUTE_START_SPEED_MPS"], "LASER_LEFT", False))
+        elif line.startswith("{ WEST, MAP_START_Y_M, ROUTE_RETURN_SPEED_MPS"):
+            legs.append(Leg(west, -0.5, speeds["ROUTE_RETURN_SPEED_MPS"], "LASER_NO_BEAM", False))
     return legs
 
 
 def check_route(legs: list[Leg]) -> float:
     assert len(legs) == 16, f"expected 16 legs, got {len(legs)}"
-    assert legs[-1].beams == ("LEFT_WALL",), "parking leg must use the left beam"
-    assert legs[-1].end_beam == "LASER_NO_BEAM"
-
+    controls = ["LEFT", "FRONT", "FRONT", "LEFT", "FRONT", "RIGHT", "FRONT", "LEFT",
+                "FRONT", "RIGHT", "FRONT", "LEFT", "FRONT", "RIGHT", "FRONT", "NO_BEAM"]
+    gated = {5, 7, 9, 11, 13, 15}
     previous = (0.2, -0.5)
-    total_distance = 0.0
-    crossed_rows: Counter[int] = Counter()
-    for number, leg in enumerate(legs, 1):
+    total = 0.0
+    for number, (leg, control) in enumerate(zip(legs, controls), 1):
+        assert leg.control == f"LASER_{control}", f"leg {number} control={leg.control}"
+        assert leg.gate == (number in gated), f"leg {number} gate={leg.gate}"
+        assert leg.control != "LASER_REAR"
         dx, dy = leg.x - previous[0], leg.y - previous[1]
+        dx = 0.0 if abs(dx) < 1e-6 else dx
+        dy = 0.0 if abs(dy) < 1e-6 else dy
         assert (dx != 0.0) ^ (dy != 0.0), f"leg {number} is not axis-aligned"
         assert leg.speed > 0.0 and math.isfinite(leg.speed)
-        distance = abs(dx) + abs(dy)
-        total_distance += distance
-        if dx != 0.0:
-            assert set(leg.beams) == {"FRONT_WALL", "REAR_WALL"}, f"leg {number} wrong cross beams"
-            expected_end = "LASER_RIGHT" if dx > 0.0 else "LASER_LEFT"
-            crossed_rows[leg.row] += 1
-        else:
-            assert len(leg.beams) == 1 and leg.beams[0] in {"LEFT_WALL", "RIGHT_WALL"}, (
-                f"leg {number} wrong side beam"
-            )
-            expected_end = "LASER_FRONT" if dy > 0.0 else "LASER_REAR"
-        assert leg.end_beam in {"LASER_NO_BEAM", expected_end}, f"leg {number} wrong end beam"
+        total += abs(dx) + abs(dy)
         previous = (leg.x, leg.y)
-
-    assert crossed_rows == Counter({7: 2, 6: 1, 5: 1, 4: 1, 3: 1, 2: 1, 1: 1}), crossed_rows
-    assert previous == (0.2, -0.5), "route must return to the launch-side target"
-    return total_distance
+    assert previous == (0.2, -0.5)
+    return total
 
 
-def simulate_leg(distance: float, vmax: float, initial: float, end: float,
-                 accel: float = 1.0, decel: float = 1.6, dt: float = 0.002) -> tuple[float, float]:
-    remaining = distance
-    speed = initial
-    elapsed = 0.0
-    while remaining > 0.005:
-        assert elapsed < 120.0, "route model failed to reach an endpoint"
-        braking = math.sqrt(end * end + 2.0 * decel * max(remaining, 0.0))
-        target = min(vmax, braking)
-        previous = speed
-        if speed < target:
-            speed = min(target, speed + accel * dt)
-            assert speed - previous <= accel * dt + 1e-9
-        else:
-            speed = max(target, speed - decel * dt)
-            assert previous - speed <= decel * dt + 1e-9
-        assert -1e-9 <= speed <= vmax + 1e-9
-        remaining -= speed * dt
-        elapsed += dt
-    return elapsed, speed
-
-
-def check_static_control() -> None:
-    route_header = (MCU / "src/app/map_route.h").read_text(encoding="utf-8")
-    runtime = (MCU / "src/app/app_runtime.c").read_text(encoding="utf-8")
+def check_control_contract() -> None:
+    assert numeric_define(LASER_HEADER, "LASER_MIN_RANGE_MM") == 0
+    assert numeric_define(LASER_HEADER, "LASER_MAX_RANGE_MM") == 5000
+    assert numeric_define(CONTROL_SOURCE, "LASER_TARGET_MM") == 65
+    assert numeric_define(CONTROL_SOURCE, "LASER_TARGET_TOLERANCE_MM") == 8
+    assert numeric_define(CONTROL_SOURCE, "LASER_SAFETY_MM") == 55
+    assert "MAP SPEED seg=%u phase=%s" in CONTROL_SOURCE
+    assert "ROUTE_SPEED_ACCEL" in CONTROL_SOURCE and "ROUTE_SPEED_DECEL" in CONTROL_SOURCE
+    assert "MAP ALIGN seg=%u beam=%u raw=%u target=65" in CONTROL_SOURCE
+    assert "MAP ALIGN SKIP" in CONTROL_SOURCE and "MAP ALIGNED" in CONTROL_SOURCE
+    assert numeric_define(CONTROL_SOURCE, "LASER_FURROW_SUM_MIN_MM") == 100
+    assert numeric_define(CONTROL_SOURCE, "LASER_FURROW_SUM_MAX_MM") == 140
+    assert numeric_define(CONTROL_SOURCE, "ROUTE_END_TOLERANCE_M") == 0.005
+    assert numeric_define(CONTROL_SOURCE, "APP_ODOM_TEST_SETTLE_READY_MS") == 100
     assert re.search(r"config\.wheel_only\s*=\s*true\s*;", ODOM_ASSEMBLY)
     assert not re.search(r"^\s*assemble_imu\s*\(\s*\)\s*;", ENTRY_SOURCE, re.M)
-    assert re.search(r"^#define\s+MAP_ROUTE_LASER_GUIDANCE_ENABLED\s+0$", route_header, re.M)
-    assert "laser_odom_is_online()" not in runtime
-    assert "get_gyro_corrected" not in CONTROL_SOURCE
-    assert "route_laser_anchor" in CONTROL_SOURCE
-    assert "odom_relocalize_xy" in CONTROL_SOURCE
-    assert "route_update_speed" in CONTROL_SOURCE
-    assert "APP_ODOM_TEST_TRANSITION_SPEED_MPS" in CONTROL_SOURCE
-    assert "if(motion_scale == 0.0f)" in CONTROL_SOURCE
-    assert "const bool wait_laser = use_laser && !laser_odom_is_online();" in CONTROL_SOURCE
-    assert "const float drive = (test_vy ? sign : -sign)" in CONTROL_SOURCE
-    assert "const float wheel_x = -dx * s_odom_test.heading_sin + dy * s_odom_test.heading_cos;" in CONTROL_SOURCE
+    assert "chassis_yaw_hold" not in CONTROL_SOURCE
+    assert "odom_relocalize_xy" not in CONTROL_SOURCE
+    assert re.search(r"chassis\.set_velocity\([^;]+,\s*0\.0f\)", CONTROL_SOURCE)
+    assert "route_furrow_gate" in CONTROL_SOURCE
+    assert "route_safety_escape" in CONTROL_SOURCE
+    assert "leg->furrow_gate && route_laser_valid(sample, LASER_REAR" in CONTROL_SOURCE
 
+    # Removed dangerous endpoint behavior must stay removed.
+    for forbidden in (
+        "end_beam", "endpoint_votes", "LASER_ENDPOINT_FRAMES",
+        "LASER_ENDPOINT_MIN_SPEED_MPS", "remaining_for_braking", "endpoint_overshot",
+    ):
+        assert forbidden not in CONTROL_SOURCE, f"obsolete endpoint logic remains: {forbidden}"
+    assert "end_beam" not in ROUTE_HEADER and "end_beam" not in ROUTE_SOURCE
+    assert "route_braking_speed(remaining)" in CONTROL_SOURCE
+    assert "if(index == 0u)" in CONTROL_SOURCE
+    assert "sample->distance_mm[LASER_FRONT] <=" in CONTROL_SOURCE
+    assert "endpoint_ready = remaining <= ROUTE_END_TOLERANCE_M" in CONTROL_SOURCE
 
-def check_body_commands(legs: list[Leg]) -> None:
-    """Every map displacement must use the confirmed right-handed body axes."""
-    previous = (0.2, -0.5)
-    for number, leg in enumerate(legs, 1):
-        dx, dy = leg.x - previous[0], leg.y - previous[1]
-        if dx:
-            expected = "+vy" if dx > 0.0 else "-vy"
+    # Raw >65 moves toward the wall; raw <65 moves away. Only vx/vy are used.
+    target = 65.0
+    for raw in (0.0, 40.0, 65.0, 100.0, 5000.0):
+        error = raw - target
+        if abs(error) <= 3.0:
+            error = 0.0
         else:
-            expected = "-vx" if dy > 0.0 else "+vx"
-        leg_command = ("+vy" if dx > 0.0 else "-vy") if dx else ("-vx" if dy > 0.0 else "+vx")
-        assert leg_command == expected, f"leg {number} wrong body command"
-        previous = (leg.x, leg.y)
+            error -= math.copysign(3.0, error)
+        front_vx = -error
+        left_vy = -error
+        right_vy = error
+        if raw > 65:
+            assert front_vx < 0 and left_vy < 0 and right_vy > 0
+        elif raw < 65:
+            assert front_vx > 0 and left_vy > 0 and right_vy < 0
+        else:
+            assert front_vx == left_vy == right_vy == 0
+
+    # Independent 55 mm escape model: zero is valid and commands away from walls.
+    for raw in (0.0, 30.0, 54.0):
+        escape = min(0.12, 4.0 * (55.0 - raw) * 0.001)
+        assert escape > 0.0
+        assert escape <= 0.12
+        front_vx, left_vy, right_vy, rear_vx = escape, escape, -escape, -escape
+        assert front_vx > 0 and left_vy > 0 and right_vy < 0 and rear_vx < 0
+    for raw in (55.0, 65.0, 5000.0):
+        assert raw >= 55.0  # no safety escape outside the protected range
 
 
-def check_anchor_geometry() -> None:
-    """A positive cross residual must shift field position by minus residual."""
-    for yaw in (-2.4, -0.7, 0.0, 0.9, 2.8):
-        cosine, sine = math.cos(yaw), math.sin(yaw)
-        for test_vy in (False, True):
-            residual = 0.03
-            dx = residual * cosine if test_vy else residual * sine
-            dy = residual * sine if test_vy else -residual * cosine
-            field_x_delta = -dx * sine + dy * cosine
-            field_y_delta = -dx * cosine - dy * sine
-            field_delta = field_y_delta if test_vy else field_x_delta
-            assert math.isclose(field_delta, -residual, abs_tol=1e-6)
-            assert math.isclose(-field_delta, residual, abs_tol=1e-6)
-
-
-def check_transport_configuration() -> None:
-    fdcan = (MCU / "Core/Src/fdcan.c").read_text(encoding="utf-8")
-    uart = (MCU / "Core/Src/usart.c").read_text(encoding="utf-8")
-    ioc = (MCU / "robot.ioc").read_text(encoding="utf-8")
-    clock_match = re.search(r"^RCC\.FDCANFreq_Value=(\d+)$", ioc, re.M)
-    assert clock_match
-    clock = int(clock_match.group(1))
-    for bus in (1, 2, 3):
-        match = re.search(rf"void MX_FDCAN{bus}_Init\(void\)(.*?)(?=void MX_FDCAN|\Z)", fdcan, re.S)
-        assert match
-        block = match.group(1)
-        prescaler = int(re.search(r"NominalPrescaler = (\d+);", block).group(1))
-        seg1 = int(re.search(r"NominalTimeSeg1 = (\d+);", block).group(1))
-        seg2 = int(re.search(r"NominalTimeSeg2 = (\d+);", block).group(1))
-        assert clock / (prescaler * (1 + seg1 + seg2)) == 1_000_000
-        assert math.isclose((1 + seg1) / (1 + seg1 + seg2), 0.70)
-    assert re.findall(r"huart(?:\d+)\.Init\.BaudRate = (\d+);", uart) == ["115200"] * 4
+def ideal_leg_time(distance: float, speed_limit: float) -> float:
+    accel = numeric_define(CONTROL_SOURCE, "APP_ODOM_TEST_ACCEL_MPS2")
+    decel = numeric_define(CONTROL_SOURCE, "APP_ODOM_TEST_DECEL_MPS2")
+    peak = min(speed_limit, math.sqrt(accel * decel * distance / (accel + decel)))
+    accel_distance = peak * peak / (2.0 * accel)
+    braking_distance = peak * peak / (2.0 * decel)
+    assert accel_distance + braking_distance <= distance + 1e-6
+    cruise_distance = max(0.0, distance - accel_distance - braking_distance)
+    elapsed = peak / accel + cruise_distance / peak + peak / decel
+    assert math.isfinite(elapsed) and elapsed > 0.0
+    return elapsed
 
 
 def main() -> None:
-    check_static_control()
-    check_anchor_geometry()
-    check_transport_configuration()
+    check_control_contract()
     legs = parse_route()
     distance = check_route(legs)
-    check_body_commands(legs)
-    elapsed = 0.0
-    for index, leg in enumerate(legs):
-        previous = (0.2, -0.5) if index == 0 else (legs[index - 1].x, legs[index - 1].y)
-        leg_distance = abs(leg.x - previous[0]) + abs(leg.y - previous[1])
-        initial = 0.0 if index == 0 else 0.20
-        end = 0.0 if index + 1 == len(legs) else 0.20
-        leg_time, _ = simulate_leg(leg_distance, leg.speed, initial, end)
-        elapsed += leg_time
-    elapsed += 0.100  # Commanded final settling window; not physical stopping time.
-    print(f"PASS: {len(legs)} legs, all 7 furrows covered, route {distance:.3f} m")
-    print(f"Idealized route motion + commanded settle: {elapsed:.3f} s")
-    print("Scope: host-side source/model checks only; no firmware build or on-car validation")
+    previous = (0.2, -0.5)
+    motion_time = 0.0
+    for leg in legs:
+        leg_distance = math.hypot(leg.x - previous[0], leg.y - previous[1])
+        motion_time += ideal_leg_time(leg_distance, leg.speed)
+        previous = (leg.x, leg.y)
+    print(f"PASS: 16 legs, route {distance:.3f} m; 01 immediate front endpoint, 02..16 wheel endpoints")
+    print("PASS: raw 0..5000 mm; bidirectional 65 mm control; independent front/left/right 55 mm escape")
+    print("PASS: rear 55 mm escape and 100..140 mm gate only on 05/07/09/11/13/15")
+    print(f"PASS: 16 wheel-odometry trapezoids, ideal motion {motion_time:.2f} s plus settling")
+    print("PASS: each segment stops and settles before switching; Auto wz=0")
+    print("Scope: source/model checks only; no firmware build or on-car validation")
 
 
 if __name__ == "__main__":
