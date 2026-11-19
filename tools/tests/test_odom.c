@@ -285,7 +285,50 @@ static void test_yaw_integrals_retain_stationary_residual(void){
     near_double(after->yaw_integrated_time_s-before.yaw_integrated_time_s,1,1e-6);
     assert(after->yaw_integrated_samples-before.yaw_integrated_samples==250);
 }
+static void test_wheel_only_motion_and_feedback_gaps(void) {
+    reset_case(false);
+    imu_failure = true;
+    OdomConfig config = odom_default_config();
+    config.wheel_only = true;
+    assert(odom_init(&config) == ODOM_OK);
+    wheel.sample_time_ms = UINT32_MAX - 399u;
+    wheel.sample_sequence = UINT32_MAX - 100u;
+    wheel.velocity = (ChassisVelocity){ 1.0f, 0.0f, 1.0f };
+    assert(odom_process() == ODOM_NOT_READY);
+    for(unsigned i = 0; i < 1000; ++i) {
+        wheel.sample_time_ms += 4u;
+        ++wheel.sample_sequence;
+        assert(odom_process() == ODOM_OK && odom_is_ready());
+        assert(!odom_get_state()->imu_ready);
+        /* Extra scheduler polls between CAN frames add no displacement. */
+        assert(odom_process() == ODOM_OK);
+    }
+    const Odom* state = odom_get_state();
+    near(state->odom.x, sinf(4.0f), 0.0002f);
+    near(state->odom.y, 1.0f - cosf(4.0f), 0.0002f);
+    near(state->angle.z, 4.0f - 6.2831853f, 0.0002f);
+    assert(state->yaw_integrated_samples == 1000);
+    assert(odom_relocalize_xy(2.0f, -1.0f) == ODOM_OK);
+    const float last_heading = state->angle.z;
+    wheel.age_ms = 51u;
+    assert(odom_process() == ODOM_NOT_READY && !odom_is_ready());
+    assert(odom_process() == ODOM_NOT_READY && state->discontinuity_count == 1u);
+    wheel.age_ms = 0u;
+    wheel.sample_time_ms += 100u;
+    ++wheel.sample_sequence;
+    assert(odom_process() == ODOM_NOT_READY);
+    near(state->odom.x, 2.0f, 1e-6f);
+    near(state->angle.z, last_heading, 1e-6f);
+    wheel.sample_time_ms += 4u;
+    ++wheel.sample_sequence;
+    assert(odom_process() == ODOM_OK);
+    wheel.sample_time_ms += 80u;
+    ++wheel.sample_sequence;
+    assert(odom_process() == ODOM_NOT_READY && state->discontinuity_count == 2u);
+    assert(odom_get_gyro_corrected(&(Vector3){0}) == ODOM_NOT_READY);
+}
 int main(void){
+    test_wheel_only_motion_and_feedback_gaps();
     test_boot_calibration_gate();
     test_stationary_feedback_and_motion_exit();
     test_imu_failure_invalidates_ready();

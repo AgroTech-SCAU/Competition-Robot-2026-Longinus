@@ -21,8 +21,9 @@ void app_runtime_init(void);
 /**
  * @brief 执行一次 MCU 应用运行时轮询
  * @details 在 500Hz 主循环中统一完成输入更新, 模式仲裁, 安全检查和控制输出
+ * @param local_key_pressed 本机启动键当前是否按下，消抖和边沿检测由运行时完成
  */
-void app_runtime_process(void);
+void app_runtime_process(bool local_key_pressed);
 
 /**
  * @brief 获取当前系统级状态

@@ -10,10 +10,10 @@ static LaserOdomSample s_filtered_sample;
 static bool s_configured;
 static bool s_estimate_valid;
 
-/* Field +X runs along the ridges to the right in Fig. 1. Field +Y runs
- * across the ridges away from the entrance. The vehicle enters in -vx. */
+/* Vendor axes: F/B measure field +X/-X and L/R measure field +Y/-Y.
+ * Vehicle: field +X=+vy=LASER_RIGHT, field +Y=-vx=LASER_FRONT. */
 static const LaserBeam s_field_beams[LASER_BEAM_COUNT] = {
-    LASER_LEFT, LASER_RIGHT, LASER_FRONT, LASER_REAR,
+    LASER_RIGHT, LASER_LEFT, LASER_FRONT, LASER_REAR,
 };
 
 static bool laser_field_init(void) {

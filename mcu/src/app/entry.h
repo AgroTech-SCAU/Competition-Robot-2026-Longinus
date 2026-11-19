@@ -12,6 +12,7 @@
 #include "chassis.h"
 #include "delay.h"
 #include "log.h"
+#include "main.h"
 #include "odom.h"
 #include "remote.h"
 
@@ -92,11 +93,6 @@ static inline void entry_init(void) {
     log_info("BOOT rgb ready");
     delay_ms(100u);
 
-    if(!entry_boot_check(assemble_imu(), "imu"))
-        return;
-    log_info("BOOT imu ready");
-    delay_ms(100u);
-
     if(!entry_boot_check(assemble_odom(), "odom"))
         return;
     log_info("BOOT odom ready");
@@ -152,7 +148,7 @@ static inline void entry_loop(void) {
     uint32_t elapsed_ticks;
     if(assemble_scheduler_take_tick(&elapsed_ticks)) {
         /* Passive feedback remains live in IDLE/FAULT/ESTOP and is available
-           before this cycle's IMU/odometry update. This never enables motors. */
+           before this cycle's wheel odometry update. This never enables motors. */
         (void)chassis_poll_feedback();
         assemble_laser_process();
         if(entry_tick_250hz(elapsed_ticks)) {
@@ -161,7 +157,7 @@ static inline void entry_loop(void) {
         if(entry_tick_100hz(elapsed_ticks)) {
             remote_process();
         }
-        app_runtime_process();
+        app_runtime_process(HAL_GPIO_ReadPin(USER_KEY_GPIO_Port, USER_KEY_Pin) == GPIO_PIN_RESET);
         assemble_scheduler_finish_tick();
     }
     app_status_process();

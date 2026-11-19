@@ -52,13 +52,8 @@ static AppControlResult app_control_apply_remote_chassis(const RemoteState* stat
 // ! ========================= 接 口 函 数 实 现 ========================= ! //
 
 void app_control_init(void) {
-    ChassisYawHoldConfig yaw_hold_config = chassis_yaw_hold_default_config();
-
-    yaw_hold_config.kp = 48.0f;
-    yaw_hold_config.kd = 2.0f;
-    yaw_hold_config.v_deadband = 0.01f;
-    yaw_hold_config.wz_deadband = 0.08f;
-    yaw_hold_config.wz_limit = 1.0f;
+    ChassisYawHoldConfig yaw_hold_config = odom.get_state()->wheel_only
+        ? chassis_yaw_hold_wheel_config() : chassis_yaw_hold_default_config();
     chassis_yaw_hold_init(&yaw_hold_config);
     s_remote_yaw_target_valid = false;
 }
@@ -235,10 +230,12 @@ static AppControlResult app_control_apply_remote_chassis(const RemoteState* stat
 
     {
         Vector3 angle = { 0 };
-        Vector3 gyro_corrected = { 0 };
+        Vector3 rate = { 0 };
+        OdomStatus rate_status = odom.get_state()->wheel_only
+            ? odom.get_velocity(&rate) : odom.get_gyro_corrected(&rate);
 
-        if(odom.get_angle(&angle) != ODOM_OK || odom.get_gyro_corrected(&gyro_corrected) != ODOM_OK ||
-           !isfinite(angle.z) || !isfinite(gyro_corrected.z)) {
+        if(odom.get_angle(&angle) != ODOM_OK || rate_status != ODOM_OK ||
+           !isfinite(angle.z) || !isfinite(rate.z)) {
             log_warn("APP_CONTROL remote chassis yaw_hold skipped: odom not ready");
             return APP_CONTROL_RESULT_ODOM_ERROR;
         }
@@ -249,7 +246,7 @@ static AppControlResult app_control_apply_remote_chassis(const RemoteState* stat
             chassis_yaw_hold_set_target(angle.z);
             s_remote_yaw_target_valid = true;
         }
-        wz = chassis_yaw_hold_apply(vx, vy, wz, angle.z, gyro_corrected.z, REMOTE_CONTROL_PERIOD_S);
+        wz = chassis_yaw_hold_apply(vx, vy, wz, angle.z, rate.z, REMOTE_CONTROL_PERIOD_S);
     }
 
     return app_control_merge_result(result,

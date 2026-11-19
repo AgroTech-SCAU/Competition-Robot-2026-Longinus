@@ -6,6 +6,7 @@
 #include "laser_field.h"
 #include "laser_odom.h"
 #include "log.h"
+#include "map_route.h"
 #include "odom.h"
 
 #include <math.h>
@@ -13,15 +14,22 @@
 
 #define APP_ODOM_TEST_CONTROL_PERIOD_S 0.002f
 #define APP_ODOM_TEST_STOP_SPEED_MPS 0.02f
-#define APP_ODOM_TEST_STOP_SETTLE_MS 150u
+#define APP_ODOM_TEST_STOP_SETTLE_MS 100u
+#define ROUTE_END_TOLERANCE_M 0.005f
 #define APP_ODOM_TEST_STOP_TIMEOUT_MS 2000u
+#define APP_ODOM_TEST_TRANSITION_SPEED_MPS 0.20f
+#define APP_ODOM_TEST_ACCEL_MPS2 1.0f
+#define APP_ODOM_TEST_DECEL_MPS2 1.6f
+#define APP_ODOM_TEST_ANCHOR_MIN_PROGRESS_M 0.20f
+#define APP_ODOM_TEST_ANCHOR_GATE_M 0.08f
+#define APP_ODOM_TEST_ANCHOR_LIMIT_M 0.03f
+#define APP_ODOM_TEST_ANCHOR_PAIR_TOL_M 0.04f
 #define APP_ODOM_TEST_ODOM_DEADBAND_M 0.005f
 #define APP_ODOM_TEST_YAW_SLOW_RAD 0.035f
 #define APP_ODOM_TEST_YAW_STOP_RAD 0.087f
 #define LASER_SIDE_CAPTURE_MAX_MM 250.0f
 #define LASER_FRONT_REAR_CAPTURE_MAX_MM 80.0f
-#define LASER_SIDE_RESERVE_MM 8.0f
-#define LASER_LEFT_SETBACK_MM (6.0f + 20.0f)
+#define LASER_LEFT_SETBACK_MM MAP_START_LEFT_SETBACK_MM
 #define LASER_START_LEFT_APPROACH_WINDOW_MM 20.0f
 #define LASER_START_LEFT_LOOKAHEAD_S 0.35f
 #define LASER_START_LEFT_ESCAPE_HALF_SPEED_ERROR_M 0.010f
@@ -73,12 +81,6 @@ static const float s_sensor_setback_mm[LASER_BEAM_COUNT] = {
 };
 
 typedef struct {
-    LaserBeam beam;
-    float min_mm;
-    float max_mm;
-} AppLaserBand;
-
-typedef struct {
     float accepted_wall_mm;
     float candidate_mm;
     uint32_t accepted_ms;
@@ -100,44 +102,24 @@ typedef struct {
     float drift_mps;
 } AppStartLeftMotion;
 
-typedef struct {
-    float distance_m;
-    float vx;
-    float vy;
-    AppLaserBand cruise[2];
-} AppOdomTestSegment;
-
-/* Distance in m, velocities in m/s, then each cruise beam and its body clearance in mm.
- * Use L/R for vx, and F/B for vy. LASER_NO_BEAM means there is no second reference.
- * Start-left raw target is 53..55 mm. Other raw-range centres: L=60.5, F=67, B/R=65 mm.
- * R=65 is the explicit boundary measurement; ridge-obscured R photos are not calibration points.
- * Bands below subtract the existing F/B/L/R setbacks of 16/56/26/16 mm. */
-static const AppOdomTestSegment s_route[] = {
-    {  4.75f,  -0.5f,  0.00f, { { LASER_LEFT, 53.0f - LASER_LEFT_SETBACK_MM,
-                                              55.0f - LASER_LEFT_SETBACK_MM }, { .beam = LASER_NO_BEAM } } }, /* 01 */
-    {  1.78f,   0.0f,  0.30f, { { LASER_FRONT, 49, 53 }, { LASER_REAR,  7, 11 } } },     /* 02 */
-    {  1.78f,   0.0f, -0.30f, { { LASER_FRONT, 49, 53 }, { LASER_REAR,  7, 11 } } },     /* 03 */
-    {  0.72f,   0.3f,  0.00f, { { LASER_LEFT , 33, 36 }, { .beam = LASER_NO_BEAM } } },  /* 04 */
-    {   2.72f,   0.0f,  0.30f, { { LASER_FRONT, 49, 53 }, { LASER_REAR,  7, 11 } } },     /* 05 */
-    { 0.715f,   0.3f,  0.00f, { { LASER_RIGHT, 47, 51 }, { .beam = LASER_NO_BEAM } } },  /* 06 */
-    {   2.64f,   0.0f, -0.30f, { { LASER_FRONT, 49, 53 }, { LASER_REAR,  7, 11 } } },     /* 07 */
-    {  0.72f,   0.3f,  0.00f, { { LASER_LEFT , 33, 36 }, { .beam = LASER_NO_BEAM } } },  /* 08 */
-    {  2.76f,   0.0f,  0.30f, { { LASER_FRONT, 49, 53 }, { LASER_REAR,  7, 11 } } },     /* 09 */
-    {  0.72f,   0.3f,  0.00f, { { LASER_RIGHT, 47, 51 }, { .beam = LASER_NO_BEAM } } },  /* 10 */
-    {  2.76f,   0.0f, -0.30f, { { LASER_FRONT, 49, 53 }, { LASER_REAR,  7, 11 } } },     /* 11 */
-    {  0.72f,   0.3f,  0.00f, { { LASER_LEFT , 33, 36 }, { .beam = LASER_NO_BEAM } } },  /* 12 */
-    {  2.75f,   0.0f,  0.30f, { { LASER_FRONT, 49, 53 }, { LASER_REAR,  7, 11 } } },     /* 13 */
-    {  0.72f,   0.3f,  0.00f, { { LASER_RIGHT, 47, 51 }, { .beam = LASER_NO_BEAM } } },  /* 14 */
-    {  2.75f,   0.0f, -0.30f, { { LASER_FRONT, 49, 53 }, { LASER_REAR,  7, 11 } } },     /* 15 */
-    {   0.8f,   0.5f, 0.00f, { { LASER_FRONT, 49, 53 }, { LASER_REAR,  7, 11 } } },     /* 16 */
-};
-
-#define APP_ODOM_TEST_ROUTE_COUNT (sizeof(s_route) / sizeof(s_route[0]))
+typedef enum {
+    ROUTE_START_LEG = 0,
+    ROUTE_TRAVEL,
+    ROUTE_SETTLE,
+    ROUTE_PARKED
+} RoutePhase;
 
 typedef struct {
     size_t segment_index;
-    bool segment_started;
-    bool segment_stopping;
+    RoutePhase phase;
+    MapRouteAxis field_x;
+    MapRouteAxis field_y;
+    MapFenceTrack fence;
+    float remaining_m;
+    float along_mps;
+    float last_progress_position_m;
+    uint32_t travel_ms;
+    uint32_t progress_ms;
     bool stationary;
     bool laser_waiting;
     bool following_laser;
@@ -145,10 +127,12 @@ typedef struct {
     uint32_t stationary_since_ms;
     uint32_t last_tracked_frame;
     uint32_t last_control_ms;
+    Vector3 route_origin;
     Vector3 origin;
     float heading_cos;
     float heading_sin;
-    float progress_m;
+    float route_speed_mps;
+    bool anchor_done;
     float correction_mps;
     float correction_accel_mps2;
     float line_cross_m;
@@ -169,11 +153,11 @@ AppLaserFix app_odom_test_get_laser_fix(void) {
 }
 
 float app_odom_test_remaining_m(void) {
-    if(s_odom_test.segment_index >= APP_ODOM_TEST_ROUTE_COUNT) {
-        return 0.0f;
-    }
-    const float distance_m = s_route[s_odom_test.segment_index].distance_m;
-    return s_odom_test.segment_started ? fmaxf(0.0f, distance_m - s_odom_test.progress_m) : distance_m;
+    return s_odom_test.remaining_m;
+}
+
+bool app_odom_test_is_done(void) {
+    return s_odom_test.phase == ROUTE_PARKED;
 }
 
 static bool app_odom_test_cruise_band_valid(const AppLaserBand* band, bool test_vy) {
@@ -187,6 +171,18 @@ static bool app_odom_test_cruise_band_valid(const AppLaserBand* band, bool test_
 }
 
 static AppControlResult app_odom_test_finish_segment(uint32_t now) {
+    if(s_odom_test.segment_index + 1u < map_route_count) {
+        ++s_odom_test.segment_index;
+        s_odom_test.phase = ROUTE_START_LEG;
+        s_odom_test.along_mps = APP_ODOM_TEST_TRANSITION_SPEED_MPS;
+        s_odom_test.route_speed_mps = APP_ODOM_TEST_TRANSITION_SPEED_MPS;
+        s_odom_test.correction_mps = 0.0f;
+        s_odom_test.correction_accel_mps2 = 0.0f;
+        log_info("MAP NEXT %u/%u", (unsigned int)s_odom_test.segment_index + 1u,
+                 (unsigned int)map_route_count);
+        return APP_CONTROL_RESULT_OK;
+    }
+
     const AppControlResult stop = app_control_hold_zero_chassis();
     if(stop != APP_CONTROL_RESULT_OK) return stop;
 
@@ -194,7 +190,8 @@ static AppControlResult app_odom_test_finish_segment(uint32_t now) {
     if(odom.get_velocity(&velocity) != ODOM_OK || !isfinite(velocity.x) || !isfinite(velocity.y)) {
         return APP_CONTROL_RESULT_ODOM_ERROR;
     }
-    if(hypotf(velocity.x, velocity.y) > APP_ODOM_TEST_STOP_SPEED_MPS) {
+    if(!isfinite(velocity.z)) return APP_CONTROL_RESULT_ODOM_ERROR;
+    if(hypotf(velocity.x, velocity.y) > APP_ODOM_TEST_STOP_SPEED_MPS || fabsf(velocity.z) > 0.05f) {
         s_odom_test.stationary = false;
         return now - s_odom_test.stop_since_ms >= APP_ODOM_TEST_STOP_TIMEOUT_MS
             ? APP_CONTROL_RESULT_ODOM_ERROR : stop;
@@ -206,8 +203,12 @@ static AppControlResult app_odom_test_finish_segment(uint32_t now) {
     if(now - s_odom_test.stationary_since_ms < APP_ODOM_TEST_STOP_SETTLE_MS) return stop;
 
     ++s_odom_test.segment_index;
-    s_odom_test.segment_started = false;
-    s_odom_test.segment_stopping = false;
+    s_odom_test.phase = s_odom_test.segment_index == map_route_count ? ROUTE_PARKED : ROUTE_START_LEG;
+    if(s_odom_test.phase == ROUTE_PARKED) {
+        s_odom_test.remaining_m = 0.0f;
+        log_info("MAP PARKED");
+    }
+    s_odom_test.along_mps = 0.0f;
     s_odom_test.stationary = false;
     s_odom_test.correction_mps = 0.0f;
     s_odom_test.correction_accel_mps2 = 0.0f;
@@ -259,8 +260,8 @@ static void app_odom_test_track(AppLaserTrack* track, const LaserOdomSample* sam
 }
 
 static float app_odom_test_motion_fix(AppLaserFix* fix, const LaserOdomSample* sample,
-                                      const AppOdomTestSegment* segment, bool test_vy,
-                                       float cross_m, float sample_cross_m, float reserve_mm, uint32_t now) {
+                                      const MapRouteLeg* segment, bool test_vy,
+                                       float cross_m, float sample_cross_m, uint32_t now) {
     if(sample->received == 0u) return 0.0f;
     const uint32_t age_ms = now - sample->stamp_ms;
     const bool new_frame = sample->received != s_odom_test.last_tracked_frame;
@@ -271,8 +272,13 @@ static float app_odom_test_motion_fix(AppLaserFix* fix, const LaserOdomSample* s
         const LaserBeam beam = band->beam;
         if(beam == LASER_NO_BEAM) continue;
 
-        const float direction = beam == LASER_LEFT || beam == LASER_REAR ? 1.0f : -1.0f;
+        const float direction = test_vy ? (beam == LASER_REAR ? 1.0f : -1.0f)
+                                           : (beam == LASER_RIGHT ? 1.0f : -1.0f);
         AppLaserTrack* track = &s_odom_test.tracks[beam];
+        if(!map_route_wall_visible(segment->y_m, fix->x, beam)) {
+            *track = (AppLaserTrack){ 0 };
+            continue;
+        }
         if(age_ms > LASER_TRACK_MAX_AGE_MS) {
             track->usable = false;
             track->confirmations = 0u;
@@ -305,10 +311,11 @@ static float app_odom_test_motion_fix(AppLaserFix* fix, const LaserOdomSample* s
         if(fix->track_mask != 0u ? !(fix->track_mask & (1u << beam)) :
            !track->anchored || now - track->accepted_ms > LASER_TRACK_HOLD_MS) continue;
 
-        const float direction = beam == LASER_LEFT || beam == LASER_REAR ? 1.0f : -1.0f;
+        const float direction = test_vy ? (beam == LASER_REAR ? 1.0f : -1.0f)
+                                           : (beam == LASER_RIGHT ? 1.0f : -1.0f);
         const float clearance_mm = direction * (track->accepted_wall_mm - cross_m * 1000.0f);
-        const float min_mm = band->min_mm + reserve_mm;
-        const float max_mm = band->max_mm + reserve_mm;
+        const float min_mm = band->min_mm;
+        const float max_mm = band->max_mm;
         const float lower = direction * (clearance_mm - max_mm);
         const float upper = direction * (clearance_mm - min_mm);
         const float beam_low_mm = fminf(lower, upper);
@@ -490,155 +497,240 @@ static float app_odom_test_curve_y(float target, float accel_cap, bool start_lef
     return s_odom_test.correction_mps + 0.5f * (previous_accel + accel) * dt;
 }
 
+/* Preserve a controlled handover speed between legs; only the parking leg
+ * plans all the way to zero. Wheel slip still requires on-car derating. */
+static float route_braking_speed(float remaining_m, float end_speed_mps) {
+    return sqrtf(end_speed_mps * end_speed_mps +
+                 2.0f * APP_ODOM_TEST_DECEL_MPS2 * fmaxf(0.0f, remaining_m));
+}
+
+static float route_update_speed(float target_mps, float dt_s) {
+    const float previous = s_odom_test.route_speed_mps;
+    const float accel_step = APP_ODOM_TEST_ACCEL_MPS2 * dt_s;
+    const float decel_step = APP_ODOM_TEST_DECEL_MPS2 * dt_s;
+    if(previous < target_mps) return fminf(target_mps, previous + accel_step);
+    return fmaxf(target_mps, previous - decel_step);
+}
+
+/* Estimate cross-track error from an already locked reflecting face. The
+ * accepted wall is relative to this leg's nominal line, so the expected raw
+ * range at that line produces zero cross error. At most one attempt per leg. */
+static bool route_laser_anchor(const MapRouteLeg* leg, float reserve_mm, float cross_m,
+                               float progress_m, uint32_t now, float* correction_m) {
+    if(s_odom_test.anchor_done || progress_m < APP_ODOM_TEST_ANCHOR_MIN_PROGRESS_M) return false;
+    float estimates[2] = { 0.0f, 0.0f };
+    size_t count = 0u;
+    const bool along_x = leg->cruise[0].beam == LASER_FRONT || leg->cruise[0].beam == LASER_REAR;
+    for(size_t i = 0; i < sizeof(leg->cruise) / sizeof(leg->cruise[0]); ++i) {
+        const AppLaserBand* band = &leg->cruise[i];
+        if(band->beam == LASER_NO_BEAM ||
+           !map_route_wall_visible(leg->y_m, s_odom_test.laser.x, band->beam)) continue;
+        const AppLaserTrack* track = &s_odom_test.tracks[band->beam];
+        if(!track->usable || now - track->accepted_ms > LASER_TRACK_MAX_AGE_MS) continue;
+        const float direction = along_x ? (band->beam == LASER_REAR ? 1.0f : -1.0f)
+                                        : (band->beam == LASER_RIGHT ? 1.0f : -1.0f);
+        const float reference_mm = s_sensor_setback_mm[band->beam] + reserve_mm +
+                                   0.5f * (band->min_mm + band->max_mm);
+        estimates[count++] = 0.001f * (track->accepted_wall_mm - direction * reference_mm);
+    }
+    if(count == 0u) return false;
+    s_odom_test.anchor_done = true;
+    if(count == 2u && fabsf(estimates[0] - estimates[1]) > APP_ODOM_TEST_ANCHOR_PAIR_TOL_M) {
+        log_warn("LASER anchor pair rejected seg=%u", (unsigned int)s_odom_test.segment_index + 1u);
+        return false;
+    }
+    const float estimate_m = count == 2u ? 0.5f * (estimates[0] + estimates[1]) : estimates[0];
+    const float residual_m = estimate_m - cross_m;
+    if(!isfinite(residual_m) || fabsf(residual_m) > APP_ODOM_TEST_ANCHOR_GATE_M) {
+        log_warn("LASER anchor gate rejected seg=%u residual=%.3f",
+                 (unsigned int)s_odom_test.segment_index + 1u, (double)residual_m);
+        return false;
+    }
+    *correction_m = fmaxf(-APP_ODOM_TEST_ANCHOR_LIMIT_M,
+                          fminf(APP_ODOM_TEST_ANCHOR_LIMIT_M, residual_m));
+    log_info("LASER anchor seg=%u correction=%.3f beams=%u",
+             (unsigned int)s_odom_test.segment_index + 1u, (double)*correction_m, (unsigned int)count);
+    return true;
+}
+
+static void route_start_leg(const MapRouteLeg* leg, Vector3 pose, float yaw,
+                            uint32_t now, uint32_t frame) {
+    if(s_odom_test.segment_index == 0u) {
+        s_odom_test.route_origin = s_odom_test.origin = pose;
+        s_odom_test.heading_cos = cosf(yaw);
+        s_odom_test.heading_sin = sinf(yaw);
+        s_odom_test.field_x.scale = s_odom_test.field_y.scale = 1.0f;
+        chassis_yaw_hold_set_target(yaw);
+    }
+    s_odom_test.fence = (MapFenceTrack){ .frame = frame };
+    s_odom_test.anchor_done = false;
+    s_odom_test.line_cross_m = 0.0f;
+    s_odom_test.preferred_beam = LASER_NO_BEAM;
+    s_odom_test.laser_waiting = s_odom_test.following_laser = false;
+    s_odom_test.start_left_motion = (AppStartLeftMotion){ 0 };
+    s_odom_test.last_tracked_frame = frame;
+    s_odom_test.last_control_ms = s_odom_test.travel_ms = now;
+    s_odom_test.progress_ms = now;
+    s_odom_test.last_progress_position_m = -INFINITY;
+    for(size_t i = 0; i < LASER_BEAM_COUNT; ++i) s_odom_test.tracks[i] = (AppLaserTrack){ 0 };
+    s_odom_test.phase = ROUTE_TRAVEL;
+    log_info("MAP TRAVEL %u/%u goal=(%.2f,%.2f) vmax=%.2f",
+             (unsigned int)s_odom_test.segment_index + 1u, (unsigned int)map_route_count,
+             (double)leg->x_m, (double)leg->y_m, (double)leg->speed_mps);
+}
+
 AppControlResult app_odom_test_process(void) {
-    Vector3 position = { 0 };
-    Vector3 angle = { 0 };
-    Vector3 gyro = { 0 };
+    const uint32_t now = delay_now_ms();
+    const bool use_laser = MAP_ROUTE_LASER_GUIDANCE_ENABLED != 0;
+    if(s_odom_test.phase == ROUTE_PARKED) return app_control_hold_zero_chassis();
+    if(s_odom_test.phase == ROUTE_SETTLE) return app_odom_test_finish_segment(now);
 
-    if(s_odom_test.segment_index >= APP_ODOM_TEST_ROUTE_COUNT) {
-        s_odom_test.laser.mask = 0u;
-        return app_control_hold_zero_chassis();
-    }
-    const AppOdomTestSegment* segment = &s_route[s_odom_test.segment_index];
-    const float distance_m = segment->distance_m;
-    const float vx = segment->vx;
-    const float vy = segment->vy;
-    const bool test_vy = vy != 0.0f;
-    const bool start_left = s_odom_test.segment_index == 0u && segment->cruise[0].beam == LASER_LEFT;
-    const float reserve_mm = test_vy || start_left ? 0.0f : LASER_SIDE_RESERVE_MM;
-    const float speed_mps = test_vy ? vy : vx;
-    uint32_t now = delay_now_ms();
-    const LaserOdomSample* sample = laser_odom_get_sample();
-
-    if(!isfinite(distance_m) || distance_m <= 0.0f ||
-       !isfinite(speed_mps) || speed_mps == 0.0f || (test_vy && vx != 0.0f)) {
-        return APP_CONTROL_RESULT_COMMAND_INVALID;
-    }
+    Vector3 position, angle, velocity;
     if(odom.get_odom(&position) != ODOM_OK || odom.get_angle(&angle) != ODOM_OK ||
-       odom.get_gyro_corrected(&gyro) != ODOM_OK ||
-       !isfinite(position.x) || !isfinite(position.y) ||
-       !isfinite(angle.z) || !isfinite(gyro.z)) {
+       odom.get_velocity(&velocity) != ODOM_OK ||
+       !isfinite(position.x) || !isfinite(position.y) || !isfinite(angle.z) ||
+       !isfinite(velocity.x) || !isfinite(velocity.y) || !isfinite(velocity.z)) {
         return APP_CONTROL_RESULT_ODOM_ERROR;
     }
 
-    if(!s_odom_test.segment_started) {
-        const AppLaserBand* primary = &segment->cruise[0];
-        const AppLaserBand* secondary = &segment->cruise[1];
-        if(!app_odom_test_cruise_band_valid(primary, test_vy) ||
-           (secondary->beam != LASER_NO_BEAM &&
-            (!test_vy || secondary->beam == primary->beam || !app_odom_test_cruise_band_valid(secondary, test_vy)))) {
-            return APP_CONTROL_RESULT_COMMAND_INVALID;
-        }
+    const size_t index = s_odom_test.segment_index;
+    const MapRouteLeg* segment = &map_route[index];
+    const float from_x = index ? map_route[index - 1u].x_m : MAP_START_X_M;
+    const float from_y = index ? map_route[index - 1u].y_m : MAP_START_Y_M;
+    const bool test_vy = segment->x_m != from_x; /* Traversing a furrow in field X. */
+    const float delta = test_vy ? segment->x_m - from_x : segment->y_m - from_y;
+    const float sign = copysignf(1.0f, delta);
+    const bool start_left = index == 0u;
+    const LaserOdomSample* sample = laser_odom_get_sample();
 
-        if(s_odom_test.segment_index == 0u) {
-            s_odom_test.heading_cos = cosf(angle.z);
-            s_odom_test.heading_sin = sinf(angle.z);
-            chassis_yaw_hold_set_target(angle.z);
-        }
-        s_odom_test.origin = position;
-        s_odom_test.line_cross_m = 0.0f;
-        s_odom_test.preferred_beam = LASER_NO_BEAM;
-        s_odom_test.laser_waiting = false;
-        s_odom_test.following_laser = false;
-        s_odom_test.last_tracked_frame = sample->received;
-        s_odom_test.last_control_ms = now;
-        for(unsigned int beam = 0u; beam < LASER_BEAM_COUNT; ++beam) {
-            s_odom_test.tracks[beam] = (AppLaserTrack){ 0 };
-        }
-        s_odom_test.segment_started = true;
-        log_info("ODOM ROUTE %u/%u start: d=%.2fm vx=%.2fm/s vy=%.2fm/s",
-                 (unsigned int)(s_odom_test.segment_index + 1u), (unsigned int)APP_ODOM_TEST_ROUTE_COUNT,
-                 (double)distance_m, (double)vx, (double)vy);
-        static const char beam_labels[] = "FBLR";
-        for(size_t i = 0; i < sizeof(segment->cruise) / sizeof(segment->cruise[0]); ++i) {
-            const AppLaserBand* band = &segment->cruise[i];
-            if(band->beam == LASER_NO_BEAM) continue;
-            log_info("LASER CRUISE seg=%u %c net=%.1f..%.1f mm",
-                     (unsigned int)(s_odom_test.segment_index + 1u), beam_labels[band->beam],
-                     (double)(band->min_mm + reserve_mm), (double)(band->max_mm + reserve_mm));
-        }
-        now = delay_now_ms();
+    if(s_odom_test.phase == ROUTE_START_LEG) {
+        const AppLaserBand* wall = segment->cruise;
+        const LaserBeam end = test_vy ? (sign > 0.0f ? LASER_RIGHT : LASER_LEFT)
+                                      : (sign > 0.0f ? LASER_FRONT : LASER_REAR);
+        if(!isfinite(delta) || delta == 0.0f || (test_vy && segment->y_m != from_y) ||
+           !isfinite(segment->speed_mps) || segment->speed_mps <= 0.0f ||
+           (segment->end_beam != LASER_NO_BEAM && segment->end_beam != end) ||
+           (use_laser && (!app_odom_test_cruise_band_valid(wall, test_vy) ||
+           (wall[1].beam != LASER_NO_BEAM && (wall[1].beam == wall->beam ||
+           !app_odom_test_cruise_band_valid(wall + 1, test_vy)))))) return APP_CONTROL_RESULT_COMMAND_INVALID;
+        route_start_leg(segment, position, angle.z, now, sample->received);
     }
-
-    const float applied_mps = s_odom_test.laser.correction_mps;
-    s_odom_test.laser = (AppLaserFix){ .x = NAN, .y = NAN, .segment = (unsigned int)s_odom_test.segment_index + 1u };
-    if(s_odom_test.segment_stopping) return app_odom_test_finish_segment(now);
 
     const float dx = position.x - s_odom_test.origin.x;
     const float dy = position.y - s_odom_test.origin.y;
-    const float x_m = dx * s_odom_test.heading_cos + dy * s_odom_test.heading_sin;
-    const float y_m = -dx * s_odom_test.heading_sin + dy * s_odom_test.heading_cos;
-    const float travel_m = test_vy ? y_m : x_m;
-    const float cross_m = test_vy ? x_m : y_m;
-    s_odom_test.progress_m = speed_mps > 0.0f ? travel_m : -travel_m;
-    if(!isfinite(s_odom_test.progress_m) || !isfinite(cross_m)) return APP_CONTROL_RESULT_ODOM_ERROR;
-    if(s_odom_test.progress_m >= distance_m) {
-        s_odom_test.segment_stopping = true;
+    /* Proper rotation at launch: field +X=+body Y, field +Y=-body X. */
+    const float wheel_x = -dx * s_odom_test.heading_sin + dy * s_odom_test.heading_cos;
+    const float wheel_y = -dx * s_odom_test.heading_cos - dy * s_odom_test.heading_sin;
+    const float cy = cosf(angle.z), sy = sinf(angle.z);
+    const float c = cy * s_odom_test.heading_cos + sy * s_odom_test.heading_sin;
+    const float s = sy * s_odom_test.heading_cos - cy * s_odom_test.heading_sin;
+    const float body_x_at_start = c * velocity.x - s * velocity.y;
+    const float body_y_at_start = s * velocity.x + c * velocity.y;
+    const float normal_mps = test_vy ? body_x_at_start : body_y_at_start;
+    const float field_speed = test_vy ? body_y_at_start : -body_x_at_start;
+    const float along_wheel = test_vy ? wheel_x : wheel_y;
+    MapRouteAxis* along = test_vy ? &s_odom_test.field_x : &s_odom_test.field_y;
+    const float goal = test_vy ? segment->x_m : segment->y_m;
+    const float applied_mps = s_odom_test.laser.correction_mps;
+    s_odom_test.laser = (AppLaserFix){ .segment = (unsigned int)index + 1u };
+    if(use_laser && map_route_observe_fence(&s_odom_test.fence, along, segment, index, test_vy, sign,
+                                           along_wheel, field_speed, sample, now, atan2f(s, c))) {
+        s_odom_test.laser.anchor_mask = 1u << segment->end_beam;
+    }
+    float field_x = wheel_x + s_odom_test.field_x.bias_m;
+    float field_y = wheel_y + s_odom_test.field_y.bias_m;
+    s_odom_test.laser.x = map_route_coordinate(true, field_x, s_odom_test.field_x.scale);
+    s_odom_test.laser.y = map_route_coordinate(false, field_y, s_odom_test.field_y.scale);
+    const float remaining = sign * (map_route_wheel_target(test_vy, goal, along->scale) -
+                                    (along_wheel + along->bias_m));
+    s_odom_test.remaining_m = fmaxf(0.0f, remaining);
+    if(remaining <= ROUTE_END_TOLERANCE_M) {
+        s_odom_test.phase = ROUTE_SETTLE;
         s_odom_test.stop_since_ms = now;
+        log_info("MAP SETTLE %u xy=(%.3f,%.3f) anchor=0x%X",
+                 (unsigned int)index + 1u, (double)s_odom_test.laser.x,
+                 (double)s_odom_test.laser.y, s_odom_test.laser.anchor_mask);
         return app_odom_test_finish_segment(now);
     }
 
-    const float cy = cosf(angle.z);
-    const float sy = sinf(angle.z);
-    const float c = cy * s_odom_test.heading_cos + sy * s_odom_test.heading_sin;
-    const float s = sy * s_odom_test.heading_cos - cy * s_odom_test.heading_sin;
-    const uint32_t age_ms = now - sample->stamp_ms;
-    float sample_cross_m = cross_m;
-    float normal_mps = 0.0f;
-    const bool compensate_sample = age_ms > 0u && age_ms <= LASER_TRACK_MAX_AGE_MS &&
-        sample->received != s_odom_test.last_tracked_frame;
-    if(!test_vy || compensate_sample) {
-        Vector3 velocity = { 0 };
-        if(odom.get_velocity(&velocity) == ODOM_OK && isfinite(velocity.x) && isfinite(velocity.y)) {
-            normal_mps = test_vy ? c * velocity.x - s * velocity.y : s * velocity.x + c * velocity.y;
+    /* Cross error is target minus wheel-estimated field position. In launch
+     * body axes it is +X for vy travel and +Y for vx travel. */
+    float cross_m = test_vy ? map_route_wheel_target(false, from_y, s_odom_test.field_y.scale) - field_y
+                            : map_route_wheel_target(true, from_x, s_odom_test.field_x.scale) - field_x;
+    const bool inside = s_odom_test.laser.y >= 0.0f;
+    const float from_goal = test_vy ? from_x : from_y;
+    const float leg_start = map_route_wheel_target(test_vy, from_goal, along->scale);
+    const float leg_end = map_route_wheel_target(test_vy, goal, along->scale);
+    float anchor_m = 0.0f;
+    if(use_laser && inside && route_laser_anchor(segment, 0.0f, cross_m,
+                                    fmaxf(0.0f, fabsf(leg_end - leg_start) - remaining), now, &anchor_m)) {
+        /* A positive correction moves opposite the corresponding field axis. */
+        const float world_dx = test_vy ? anchor_m * s_odom_test.heading_cos
+                                       : anchor_m * s_odom_test.heading_sin;
+        const float world_dy = test_vy ? anchor_m * s_odom_test.heading_sin
+                                       : -anchor_m * s_odom_test.heading_cos;
+        if(odom_relocalize_xy(position.x + world_dx, position.y + world_dy) == ODOM_OK) {
+            s_odom_test.origin.x += world_dx;
+            s_odom_test.origin.y += world_dy;
+            if(test_vy) field_y -= anchor_m;
+            else field_x -= anchor_m;
+            cross_m += anchor_m;
+            s_odom_test.laser.x = map_route_coordinate(true, field_x, s_odom_test.field_x.scale);
+            s_odom_test.laser.y = map_route_coordinate(false, field_y, s_odom_test.field_y.scale);
         }
-        else if(compensate_sample) {
-            return APP_CONTROL_RESULT_ODOM_ERROR;
+        else {
+            log_warn("LASER anchor relocalize failed seg=%u", (unsigned int)index + 1u);
         }
     }
-    if(compensate_sample) sample_cross_m -= normal_mps * ((float)age_ms * 0.001f);
-    float error_m = app_odom_test_motion_fix(&s_odom_test.laser, sample, segment, test_vy,
-                                             cross_m, sample_cross_m, reserve_mm, now);
-    const bool following_laser = s_odom_test.laser.mask != 0u;
+    const uint32_t age_ms = now - sample->stamp_ms;
+    const float sample_cross_m = age_ms <= LASER_TRACK_MAX_AGE_MS
+        ? cross_m - normal_mps * (0.001f * (float)age_ms) : cross_m;
+    float error_m = use_laser && inside
+        ? app_odom_test_motion_fix(&s_odom_test.laser, sample, segment, test_vy, cross_m, sample_cross_m, now)
+        : 0.0f;
+    const bool following_laser = use_laser && s_odom_test.laser.mask != 0u;
     AppLaserCorrection tuning = test_vy ? s_odom_correction : s_y_odom_correction;
     if(following_laser) {
         tuning = test_vy ? s_x_correction : s_y_correction;
-        /* Preserve the desired line, including any correction not yet completed. */
         s_odom_test.line_cross_m = cross_m + error_m;
     }
     else {
+        /* With lasers disabled this is the sole lateral guidance loop. */
         const float line_error_m = s_odom_test.line_cross_m - cross_m;
         error_m = copysignf(fmaxf(0.0f, fabsf(line_error_m) - APP_ODOM_TEST_ODOM_DEADBAND_M), line_error_m);
         s_odom_test.laser.mask = 0u;
     }
-    if(test_vy) {
+    if(!inside) {
+        s_odom_test.line_cross_m = 0.0f;
+        error_m = -cross_m;
+    }
+    if(!use_laser || test_vy) {
         const float previous = following_laser == s_odom_test.following_laser ? s_odom_test.correction_mps : 0.0f;
         s_odom_test.correction_mps = app_odom_test_slew_correction(error_m, tuning, previous, now);
     }
     else {
         const AppLaserBand* side = &segment->cruise[0];
-        const float direction = side->beam == LASER_LEFT ? 1.0f : -1.0f;
+        /* On vx legs cross=+body Y: LASER_RIGHT=+Y, LASER_LEFT=-Y. */
+        const float direction = side->beam == LASER_RIGHT ? 1.0f : -1.0f;
         const float lookahead_s = start_left ? LASER_START_LEFT_LOOKAHEAD_S : LASER_SIDE_LOOKAHEAD_S;
         const float lead_mm = app_odom_test_side_lead_mm(direction * normal_mps, lookahead_s);
-        error_m = app_odom_test_guard_side(side, sample, direction, cross_m, lead_mm,
-                                          side->min_mm + reserve_mm, error_m, now);
+        if(inside) error_m = app_odom_test_guard_side(side, sample, direction, cross_m, lead_mm,
+                                          side->min_mm, error_m, now);
         if(error_m * direction < 0.0f) tuning = s_y_escape_correction;
-        const float target = start_left ? app_odom_test_start_left_target(side, sample, cross_m, normal_mps,
+        const float target = start_left && inside ? app_odom_test_start_left_target(side, sample, cross_m, normal_mps,
                                                                           applied_mps, error_m, now)
                                         : app_odom_test_band_speed(error_m, tuning);
         const float accel_cap = start_left ? LASER_START_LEFT_ESCAPE_ACCEL_MPS2 : tuning.accel_mps2;
         s_odom_test.correction_mps = app_odom_test_curve_y(target, accel_cap, start_left, now);
-        if(start_left && target <= 0.0f && s_odom_test.correction_mps >= 0.0f) {
-            /* Never carry an old leftward command into the target band or through a dropout. */
+        if(start_left && inside && target <= 0.0f && s_odom_test.correction_mps >= 0.0f) {
             s_odom_test.correction_mps = 0.0f;
             s_odom_test.correction_accel_mps2 = 0.0f;
         }
     }
     s_odom_test.following_laser = following_laser;
 
-    /* Filtered/obscured beams only select laser or odometry correction, never along-track speed.
-     * Keep the existing CAN communication-loss stop separate from measurement rejection. */
-    const bool wait_laser = !laser_odom_is_online();
+    /* Wheel-only runs neither pause nor brake for absent laser frames. */
+    const bool wait_laser = use_laser && !laser_odom_is_online();
     float motion_scale = wait_laser ? 0.0f : 1.0f;
     if(wait_laser != s_odom_test.laser_waiting) {
         log_info("LASER %s seg=%u gap_ms=%lu", wait_laser ? "WAIT" : "RESUME",
@@ -646,19 +738,42 @@ AppControlResult app_odom_test_process(void) {
         s_odom_test.laser_waiting = wait_laser;
     }
 
-    /* The route owns along-track speed. The correction only changes the normal component. */
-    const float vx_route = test_vy ? s_odom_test.correction_mps : vx;
-    const float vy_route = test_vy ? vy : s_odom_test.correction_mps;
+    const float end_speed = index + 1u == map_route_count ? 0.0f : APP_ODOM_TEST_TRANSITION_SPEED_MPS;
+    float speed_limit = fminf(segment->speed_mps, route_braking_speed(remaining, end_speed));
+    if(use_laser && segment->end_beam != LASER_NO_BEAM && !s_odom_test.fence.locked) {
+        const float uncertainty = test_vy ? 0.18f : 0.26f;
+        speed_limit = fminf(speed_limit, fmaxf(0.12f,
+            route_braking_speed(remaining - uncertainty, end_speed)));
+    }
+    if(following_laser && fabsf(error_m) > 0.010f) {
+        speed_limit *= fmaxf(0.45f, 1.0f - 12.0f * (fabsf(error_m) - 0.010f));
+    }
+    const float dt = fminf(0.020f, (float)(now - s_odom_test.travel_ms) * 0.001f);
+    s_odom_test.travel_ms = now;
+    s_odom_test.route_speed_mps = route_update_speed(wait_laser ? 0.0f : speed_limit, dt);
+    s_odom_test.along_mps = s_odom_test.route_speed_mps;
+    /* Field +X=+vy and field +Y=-vx. */
+    const float drive = (test_vy ? sign : -sign) * s_odom_test.route_speed_mps;
+    const float vx_route = test_vy ? s_odom_test.correction_mps : drive;
+    const float vy_route = test_vy ? drive : s_odom_test.correction_mps;
     const float vx_cmd = c * vx_route + s * vy_route;
     const float vy_cmd = c * vy_route - s * vx_route;
-    const float wz = chassis_yaw_hold_apply(vx_cmd, vy_cmd, 0.0f, angle.z, gyro.z,
+    const float wz = chassis_yaw_hold_apply(vx_cmd, vy_cmd, 0.0f, angle.z, velocity.z,
                                              APP_ODOM_TEST_CONTROL_PERIOD_S);
-    /* Keep heading control active while translation slows or waits for a reference. */
     const float yaw_error = fabsf(chassis_yaw_hold_get_yaw_error());
     const float heading_scale = fminf(1.0f, fmaxf(0.0f,
         (APP_ODOM_TEST_YAW_STOP_RAD - yaw_error) / (APP_ODOM_TEST_YAW_STOP_RAD - APP_ODOM_TEST_YAW_SLOW_RAD)));
     motion_scale = fminf(motion_scale, heading_scale);
+    if(wait_laser || sign * along_wheel >= s_odom_test.last_progress_position_m + 0.008f) {
+        s_odom_test.last_progress_position_m = sign * along_wheel;
+        s_odom_test.progress_ms = now;
+    }
+    else if(now - s_odom_test.progress_ms > 2000u) {
+        log_warn("MAP no progress seg=%u rem=%.3f", (unsigned int)index + 1u, (double)remaining);
+        return APP_CONTROL_RESULT_ODOM_ERROR;
+    }
     if(motion_scale == 0.0f) {
+        s_odom_test.along_mps = s_odom_test.route_speed_mps = 0.0f;
         s_odom_test.correction_mps = 0.0f;
         s_odom_test.correction_accel_mps2 = 0.0f;
         if(start_left) s_odom_test.start_left_motion = (AppStartLeftMotion){ 0 };

@@ -51,6 +51,7 @@ typedef struct {
     float process_period_s;      /**< odom.process() 调用周期，单位 s */
     uint32_t (*now_us)(void* context); /**< 可选单调微秒时钟；未提供时使用样本时间戳/配置周期 */
     void* clock_context;
+    bool wheel_only;             /**< 从八路电机反馈积分平面位姿，无 IMU 依赖 */
 } OdomConfig;
 
 /**
@@ -61,9 +62,9 @@ typedef struct {
     Vector3 gyro;             /**< 最近一次原始三轴角速度，单位 rad/s */
     Vector3 gyro_bias;        /**< 最近一次 IMU 姿态算法估计的陀螺零偏，单位 rad/s */
     Vector3 gyro_corrected;   /**< 最近一次扣除零偏和补偿后的三轴角速度，单位 rad/s */
-    Vector3 angle;            /**< 融合后的三轴姿态角，x/y/z 分别为 roll/pitch/yaw，单位 rad */
-    Vector3 odom;             /**< 融合后的三轴里程，x/y 单位 m，z 当前为预留高度状态 */
-    Vector3 velocity;         /**< 融合后的底盘速度，x/y/z 分别表示 vx/vy/wz */
+    Vector3 angle;            /**< roll/pitch/yaw，单位 rad；纯轮速模式仅 yaw 可观测 */
+    Vector3 odom;             /**< 初始里程坐标系中的位置，x/y 单位 m，z 为预留高度 */
+    Vector3 velocity;         /**< 底盘坐标系的 vx/vy/wz，分别以 m/s、m/s、rad/s 表示 */
     Vector3 gyro_bias_effective; /**< 实际从 raw gyro 扣除的总零偏，含温补及静止跟踪 */
     Vector3 wheel_raw;        /**< 外部坐标下未经经验纠偏/倾斜投影的 FK vx/vy/wz */
     Vector3 wheel_corrected;  /**< 经验纠偏与倾斜投影后、独立尺度调整前 */
@@ -73,7 +74,7 @@ typedef struct {
     float process_dt_s;
     double wheel_yaw_integral_rad; /**< 独立轮速梯形积分，不 wrap、不做静止归零 */
     double imu_yaw_integral_rad;   /**< 独立 IMU Euler yaw-rate 梯形积分，不 wrap */
-    double yaw_integrated_time_s;  /**< 两路共同有效、实际已积分区间的总时长 */
+    double yaw_integrated_time_s;  /**< 当前估计模式实际已积分区间的总时长 */
     uint32_t yaw_integrated_samples; /**< 已积分区间数；首帧/中断后播种帧不计入 */
     uint32_t sample_time_us;
     uint32_t wheel_age_ms;
@@ -86,7 +87,8 @@ typedef struct {
     bool timing_valid;
     bool static_window;       /**< 已通过持续窗口与迟滞确认的静止状态 */
     bool imu_ready;           /**< true 表示最近一次 IMU 更新成功 */
-    bool fusion_ready;        /**< true 表示最近一次融合更新成功 */
+    bool fusion_ready;        /**< 当前估计模式的位姿可用；纯轮速模式不要求 imu_ready */
+    bool wheel_only;          /**< 当前固件装配的估计模式 */
     bool initialized;         /**< true 表示服务已初始化 */
 } Odom;
 
@@ -112,7 +114,7 @@ extern const struct OdomInterface {
     /**
      * @brief 执行一次里程计服务流程
      *
-     * 该函数统一刷新 IMU，读取底盘当前速度，并更新底盘 + IMU 融合里程
+     * 根据 wheel_only 选择纯轮速积分或轮速与 IMU 融合
      *
      * @return OdomStatus 状态码
      */

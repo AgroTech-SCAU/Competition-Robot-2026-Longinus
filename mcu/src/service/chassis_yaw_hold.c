@@ -67,6 +67,16 @@ ChassisYawHoldConfig chassis_yaw_hold_default_config(void) {
     return config;
 }
 
+ChassisYawHoldConfig chassis_yaw_hold_wheel_config(void) {
+    ChassisYawHoldConfig config = chassis_yaw_hold_default_config();
+    /* The measured rate now comes from the wheel speed loop itself. A gain
+       below one limits rate reversal from one delayed feedback sample. */
+    config.kp = 8.0f;
+    config.kd = 0.25f;
+    config.wz_limit = 0.55f;
+    return config;
+}
+
 /**
  * @brief 初始化航向保持模块
  * @param config 配置指针，传入 `NULL` 使用默认配置
@@ -131,11 +141,11 @@ void chassis_yaw_hold_reset(void) {
  * @param vy_cmd 底盘 y 方向速度命令，单位 m/s
  * @param wz_cmd 用户原始旋转命令，单位 rad/s
  * @param yaw 当前 yaw，单位 rad
- * @param gyro_z_corrected 当前 z 轴角速度，单位 rad/s
+ * @param measured_wz 实测底盘 z 轴角速度，单位 rad/s
  * @param dt_s 控制周期，单位 s
  * @return float 叠加角度环后的目标角速度
  */
-float chassis_yaw_hold_apply(float vx_cmd, float vy_cmd, float wz_cmd, float yaw, float gyro_z_corrected, float dt_s) {
+float chassis_yaw_hold_apply(float vx_cmd, float vy_cmd, float wz_cmd, float yaw, float measured_wz, float dt_s) {
     const ChassisYawHoldConfig* config = &s_yaw_hold.config;
     bool user_rotating;
     bool user_translating;
@@ -147,7 +157,7 @@ float chassis_yaw_hold_apply(float vx_cmd, float vy_cmd, float wz_cmd, float yaw
         chassis_yaw_hold_init(NULL);
     }
 
-    if(!config->enabled || !isfinite(yaw) || !isfinite(gyro_z_corrected)
+    if(!config->enabled || !isfinite(yaw) || !isfinite(measured_wz)
         || dt_s <= 0.0f || dt_s > 0.05f) {
         s_yaw_hold.last_yaw_error = 0.0f;
         s_yaw_hold.last_fb_wz = 0.0f;
@@ -177,7 +187,7 @@ float chassis_yaw_hold_apply(float vx_cmd, float vy_cmd, float wz_cmd, float yaw
 
     yaw_error = chassis_yaw_hold_wrap_pi(s_yaw_hold.yaw_ref - yaw);
     p_wz = pid_calculate(&s_yaw_hold.pd, yaw_error, 0.0f, dt_s);
-    d_wz = -config->kd * gyro_z_corrected;
+    d_wz = -config->kd * measured_wz;
     s_yaw_hold.last_fb_wz = p_wz + d_wz;
     if(s_yaw_hold.last_fb_wz > config->wz_limit) {
         s_yaw_hold.last_fb_wz = config->wz_limit;

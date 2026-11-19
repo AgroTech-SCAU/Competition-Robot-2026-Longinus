@@ -2,7 +2,39 @@
 
 STM32H723 四舵轮底盘。支持遥控驾驶和固定路线 Auto 测试。
 
-**Auto 先按里程计起步。** 沿计划方向走满 1 cm 后开始等待满足条件的新激光帧。当前第 01 段以 `vx = -0.60 m/s` 后退 4.77 m，巡航跟踪左束，段末用左束对准 450–550 mm。
+**当前 Auto 是空旷场地纯轮速路线验证版。** 只使用四轮反馈里程计和轮速航向闭环；激光保留接收与日志，但不参与纠偏、端点制动、自检或停车等待。`MAP_ROUTE_LASER_GUIDANCE_ENABLED = 0`，后续完成方向和安装标定后再启用激光引导。
+
+## 当前车体坐标系与摆车方向
+
+以遥控器和舵轮运动学的右手系为准：`+vx` 是实际车头，`+vy` 是运动学左侧，`+wz` 逆时针。`base_link` 位于四个舵向轴的几何中心；`192 × 192 mm` 是舵向轴间距，不是整车包络。
+
+![当前车体、舵轮和四路激光俯视示意图](docs/current_laser_base_link_topview.png)
+
+| 运动学方向 | 激光枚举 | 当前外缘预留量 |
+| --- | --- | ---: |
+| `+vx`，实际车头 | `LASER_REAR` | 56 mm |
+| `-vx`，实际车尾 | `LASER_FRONT` | 16 mm |
+| `+vy`，运动学左侧 | `LASER_RIGHT` | 16 mm |
+| `-vy`，运动学右侧 | `LASER_LEFT` | 26 mm |
+
+摆车时，实际车头 `+vx` 朝场外，车尾 `LASER_FRONT` 朝场内，以 `-vx` 倒车进入地图。名义起点为场地 `(X, Y) = (0.20, -0.50) m`，并固定使用正常右手旋转：
+
+```text
+场地 +X = +vy
+场地 +Y = -vx
+```
+
+外缘净间隙使用 `原始测距 - 对应 setback`。上图中的传感器位置仅表示方向；四路发射点相对 `base_link` 的实际坐标仍需测量。
+
+## 空旷场地纯轮速路线图
+
+![16 段纯轮速里程计验证路线](docs/wheel_only_route.png)
+
+路线共 16 段、理论行程 30.600 m，从第 7 沟外侧开始，横跨后返回，再逐沟向入口推进，最后回到起点。第 01 段 `-vx` 4.90 m，第 02 段 `+vy` 2.60 m，第 03 段 `-vy` 2.60 m；后续方向见图。
+
+验证速度为首段 `0.35 m/s`、横跨 `0.30 m/s`、换沟 `0.25 m/s`、返回 `0.30 m/s`，段间衔接 `0.20 m/s`。理想运动模型约 103 s，不包含实车打滑、舵向延迟和停车误差。路线理论范围为 `X = 0.20～2.80 m`、`Y = -0.50～4.40 m`，空旷测试时四周必须另留安全余量。
+
+使用 `SWD = 2000` 请求 Auto。纯轮速无法消除打滑和累计漂移，本版本只用于确认方向、段序和名义路线，不能据此验证实际贴边精度或比赛成绩。
 
 ## MCU 运行流程
 
@@ -18,28 +50,28 @@ STM32H723 四舵轮底盘。支持遥控驾驶和固定路线 Auto 测试。
 | `Core/`、`robot.ioc` | CubeMX 外设配置与启动入口。 |
 | `src/platform/` | HAL 适配。处理 CAN、UART、SPI、EXTI、TIM 和 DWT。 |
 | `src/service/assemble/` | 绑定硬件、SDK 驱动与实车配置。中断接收的 CAN 数据由主循环取出处理。 |
-| `src/service/` | 遥控输入、底盘控制、航向保持、轮速与 IMU 里程计、激光测距。 |
-| `src/domain/kalman/` | 融合轮速与 IMU。估计平面位置、航向和速度。确认静止时保持位姿，速度置零。 |
+| `src/service/` | 遥控输入、底盘控制、轮速航向保持、纯轮速里程计和激光测距；保留可选 IMU 接口。 |
+| `src/domain/kalman/` | 保留轮速与 IMU 融合实现。当前 `wheel_only = true`，不初始化或使用该融合器。 |
 | `src/app/` | 调度、状态切换、故障处理、手动映射、自动路线和状态显示。 |
 
 | 外设 | 用途 |
 | --- | --- |
 | FDCAN1 / FDCAN2 | 1 Mbit/s。分别连接达妙舵向电机与 DJI M2006 驱动电机。 |
-| FDCAN3 | 1 Mbit/s。接收 S21C 的经典 CAN 标准数据帧 `0x601`。8 字节依次存前、后、左、右四路距离。每路为大端 `uint16_t`，单位 mm。 |
+| FDCAN3 | 1 Mbit/s。接收 S21C 的经典 CAN 标准数据帧 `0x601`。8 字节依次存前、后、左、右四路距离。每路为大端 `uint16_t`，单位 mm。当前只记录，不控制 Auto。 |
 | UART5 | 115200 baud。FS-iA10B 遥控接收。 |
-| SPI2、EXTI | BMI088 读数与数据就绪信号。 |
+| SPI2、EXTI | BMI088 读数与数据就绪信号；当前纯轮速路线不依赖其数据。 |
 | SPI6、BDMA | WS2812 状态灯带。 |
 | USART1 | 115200 baud。输出日志与 VOFA 调试数据。 |
 
-底盘接收 `(vx, vy, wz)`，逆解为四轮舵角和轮速。舵向选用就近等效角，可配合驱动反转。轮角与轮速经正解回到车体速度，再送入里程计。启用先转后走时，舵角到位前驱动速度为零。零速指令保持舵向，满足静止条件后可保持驱动位置。见 [chassis.c](src/service/chassis.c)、[assemble_chassis.c](src/service/assemble/assemble_chassis.c) 和 [odom.c](src/service/odom.c)。
+底盘接收 `(vx, vy, wz)`，逆解为四轮舵角和轮速。舵向选用就近等效角，可配合驱动反转。轮角与轮速经正解回到车体速度，再由纯轮速里程计积分位置、航向和角速度。启用先转后走时，舵角到位前驱动速度为零。零速指令保持舵向，满足静止条件后可保持驱动位置。见 [chassis.c](src/service/chassis.c)、[assemble_chassis.c](src/service/assemble/assemble_chassis.c)、[assemble_odom.c](src/service/assemble/assemble_odom.c) 和 [odom.c](src/service/odom.c)。
 
 ## 模式与遥控
 
 | 状态 | 行为 |
 | --- | --- |
 | `Idle` | 默认状态。关闭电机输出，读取反馈。 |
-| `Manual` | 先等 IMU 标定、时序有效和三个控制轴回中。再准备电机，底盘与里程计就绪后接收摇杆指令。 |
-| `Auto` | 检查 IMU 和时序，先以零目标准备电机。底盘与里程计就绪后执行路线测试。 |
+| `Manual` | 先检查三个控制轴回中，再以零目标准备电机。底盘与纯轮速里程计就绪后接收摇杆指令。 |
+| `Auto` | 先以零目标准备电机，检查遥控、底盘和轮速里程计；就绪后执行路线，不要求 IMU 或激光在线。 |
 | `Fault` | 锁存遥控掉线、里程计或底盘错误，关闭电机输出。可恢复故障清除后回到 `Idle`。 |
 | `EStop` | 急停事件进入此状态。关闭输出，状态机保持锁定。 |
 
@@ -49,11 +81,13 @@ STM32H723 四舵轮底盘。支持遥控驾驶和固定路线 Auto 测试。
 - `SWB = 2000 / 1500 / 1000` 对应快 / 中 / 慢档。平移上限依次为 2 / 1 / 0.5 m/s，旋转上限为 8 / 4 / 2 rad/s。
 - `SWC = 2000` 关闭先转后走，`SWC = 1500` 开启。`SWC = 1000` 或 `VRA ≤ 1200` 请求制动。其余情况下，`VRB > 1200` 给零速。
 - `SWC = 1000` 且 `VRA、VRB ≤ 1200` 是停机与清故障组合。进入组合时触发一次。保持组合期间持续停机。
-- 手动平移时可锁航向。Auto 锁定路线起始航向。航向比例增益为 48，陀螺阻尼增益为 2。平移门槛为 0.01 m/s，主动旋转门槛为 0.08 rad/s，航向补偿限幅为 ±1 rad/s。
+- 手动平移时可锁航向。Auto 锁定路线起始轮速航向。纯轮速航向环参数为 `kp = 8`、`kd = 0.25`、`wz_limit = 0.55 rad/s`，角速度反馈同样来自轮速正解；平移门槛为 0.01 m/s，主动旋转门槛为 0.08 rad/s。
 
-自检综合遥控、里程计、底盘、激光和故障状态。灯色为红（未就绪）、绿（自检通过）、蓝（Manual）、橙（Fault）、紫（EStop）。USART1 每 1 s 输出心跳和诊断。里程计就绪时每 100 ms 尝试发送 VOFA 数据，激光在线时每 150 ms 尝试发送测距日志。见 [remote.c](src/service/remote.c)、[app_control.c](src/app/app_control.c)、[app_fsm.c](src/app/app_fsm.c) 和 [app_status.c](src/app/app_status.c)。
+自检只综合遥控、纯轮速里程计、底盘和故障状态，不要求激光在线。灯色为红（未就绪）、绿（自检通过）、蓝（Manual）、橙（Fault）、紫（EStop）。USART1 每 1 s 输出心跳和诊断。里程计就绪时每 100 ms 尝试发送 VOFA 数据，激光在线时每 150 ms 尝试发送测距日志。见 [remote.c](src/service/remote.c)、[app_control.c](src/app/app_control.c)、[app_fsm.c](src/app/app_fsm.c) 和 [app_status.c](src/app/app_status.c)。
 
-## Auto 参数
+## 历史激光调参资料（当前纯轮速版本不执行）
+
+> **以下内容是旧 14 段融合里程计／激光闭环版本的历史记录，不是当前路线。** 当前路线以本文顶部和 [map_route.c](src/app/map_route.c) 为准，共 16 段，`MAP_ROUTE_LASER_GUIDANCE_ENABLED = 0`。下文中的旧坐标方向、速度、段数、自检条件和激光启动逻辑均不可直接用于本次空旷场地测试；后续重新启用激光前，必须重新核对四束方向、安装偏移和专用起步算法。
 
 路线和纠偏参数位于 [app_odom_test.c](src/app/app_odom_test.c)。第一段开始时用融合里程计的当前位置和 yaw 建立路线坐标并锁定航向。按实车约定，软件 `−vx` 朝车头和前束 `F`，`+vx` 朝车尾和后束 `B`。左束 `L` 指向 `+Y`，右束 `R` 指向 `−Y`。`+wz` 为逆时针。沿 `vx` 行驶时调 Y 轴横移，沿 `vy` 行驶时调 X 轴横移。
 
@@ -222,7 +256,9 @@ STM32H723 四舵轮底盘。支持遥控驾驶和固定路线 Auto 测试。
 
 见 [app_runtime.c](src/app/app_runtime.c)、[chassis_yaw_hold.c](src/service/chassis_yaw_hold.c)、[assemble_chassis.c](src/service/assemble/assemble_chassis.c) 和 [chassis.c](src/service/chassis.c)。
 
-## 原始四束激光算法与调参
+### 原始四束激光算法与调参（历史）
+
+以下原算法说明同样仅供后续标定参考；当前纯轮速 Auto 不调用其输出来控制车辆。
 
 [odom_laser.c](vendor/odom_laser/odom_laser.c) 和 [odom_laser.h](vendor/odom_laser/odom_laser.h) 按原文件逐字节引入。[laser_field.c](src/service/laser_field.c) 编译时只给原算法的 `odom_init` 换了链接名 `field_odom_init`，避免与轮速里程计的同名函数冲突。EIDE 和固件脚本都从 `src/` 编译此接入文件。
 
@@ -293,7 +329,9 @@ STM32H723 四舵轮底盘。支持遥控驾驶和固定路线 Auto 测试。
 
 附件 `17:17:25–17:17:27` 中，车辆在 Manual 静止，`ready=1 active=1 fault=0`，CAN3 持续收帧。`seg=0 fix=0x0` 与手动模式相符。典型车身四束为 `955/3769/1256/277 mm`，当时无法验证这些束是否照到地图对应的参考面，也没有 Auto 纠偏或超时记录。
 
-## 现场故障与边界参数
+## 历史现场故障与边界参数
+
+> 本节及以下日志均来自旧融合／激光闭环固件，只用于追溯历史问题，不代表当前纯轮速版本的自检或停车条件。
 
 - VOFA 的 COM21 日志在 `16:48:37–16:53:29` 多次显示 `state=Fault src=2 code=1`。此代码来自运行时的里程计就绪检查。IMU 就绪、时间戳有效或运行中的融合就绪有一项失败就会锁存故障。路线里的激光掉线和停车超时返回 `src=2 code=4`。
 - 同时 `LASER CAN3 OK` 的帧号持续增加，`REC=0`、`busoff=0`。驱动 CAN2 的接收计数增加，舵向 CAN1 的计数停在 `16`，最后帧 ID 为 `0x14`。故障停机可使舵向停止回报。该片段只显示锁存后的状态，无法区分首发故障来自舵向反馈、IMU 还是时序。见 [运行时就绪检查](src/app/app_runtime.c#L160)。
@@ -337,3 +375,11 @@ STM32H723 四舵轮底盘。支持遥控驾驶和固定路线 Auto 测试。
 ## 工程入口
 
 用 VS Code Embedded IDE 打开 [robot.code-workspace](robot.code-workspace)，选择 Arm GNU Toolchain 和 Debug。构建依赖 Standard SDK 子模块，以及由 [robot.ioc](robot.ioc) 配置的 CubeMX 生成文件。Debug 配置见 [.eide/eide.yml](.eide/eide.yml)，链接脚本为 `STM32H723VGTX_FLASH_USER.ld`，产物位于 `build/Debug/`。
+
+也可在 `mcu` 目录用已安装的 ARM 工具链构建当前验证版：
+
+```powershell
+powershell -NoProfile -ExecutionPolicy Bypass -File tools/build_firmware.ps1 -OutputDirectory build/WheelOnlyRoute
+```
+
+输出为 `build/WheelOnlyRoute/robot.hex` 和 `robot.bin`；BIN 起始地址为 `0x08000000`。构建通过不等于实车路线已经验证，首次测试仍须架空确认轮向，再在空旷场地低速运行。

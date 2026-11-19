@@ -47,6 +47,7 @@ static OdomConfig s_config = { 0 };
 static uint32_t s_last_gyro_timestamp_us = 0u;
 static bool s_gyro_timestamp_seen = false;
 static uint32_t s_last_wheel_sequence;
+static uint32_t s_last_wheel_time_ms;
 static uint32_t s_last_acc_timestamp_us;
 static bool s_wheel_sequence_seen;
 static bool s_acc_timestamp_seen;
@@ -99,6 +100,7 @@ static OdomStatus odom_copy_vec3(bool ready, const Vector3* src, Vector3* out);
  */
 static bool odom_resolve_process_dt_s(const ImuSample* sample, float* dt_s);
 static bool odom_finite_vec3(Vector3 value);
+static OdomStatus odom_process_wheels(const ChassisObservation* wheel);
 static void odom_invalidate(void);
 static void odom_integrate_yaw_inputs(const ChassisImuOdomChassis* wheel,
                                      const ChassisImuOdomImu* imu_input, float dt_s);
@@ -130,8 +132,10 @@ OdomStatus odom_init(const OdomConfig* config) {
     memset(&s_odom, 0, sizeof(s_odom));
     memset(&s_fusion, 0, sizeof(s_fusion));
     s_config = (config != NULL) ? *config : odom_default_config();
+    s_odom.wheel_only = s_config.wheel_only;
     s_last_gyro_timestamp_us = 0u;
     s_last_wheel_sequence = 0u;
+    s_last_wheel_time_ms = 0u;
     s_last_acc_timestamp_us = 0u;
     s_gyro_timestamp_seen = false;
     s_wheel_sequence_seen = false;
@@ -148,9 +152,12 @@ OdomStatus odom_init(const OdomConfig* config) {
         s_config.imu_yaw_rate_scale = 1.0f;
     }
 
-    status = chassis_imu_odom.init(&s_fusion, &s_config.fusion);
-    if(status != chassis_imu_odom.OK) {
-        return od.FUSION_FAILED;
+    if(!s_config.wheel_only) {
+        status = chassis_imu_odom.init(&s_fusion, &s_config.fusion);
+        if(status != chassis_imu_odom.OK) return od.FUSION_FAILED;
+    }
+    else {
+        chassis_update_imu_tilt(NAN, NAN);
     }
 
     s_odom.initialized = true;
@@ -160,8 +167,7 @@ OdomStatus odom_init(const OdomConfig* config) {
 /**
  * @brief 执行一次里程计服务流程
  *
- * 该函数统一刷新 IMU，读取底盘速度，并更新底盘 + IMU 融合里程
- * 上层任务不再直接调用 imu.update()
+ * 使用装配时选择的纯轮速或轮速与 IMU 模式更新里程
  *
  * @return OdomStatus 状态码
  */
@@ -175,7 +181,6 @@ OdomStatus odom_process(void) {
 
     if(!s_odom.initialized) return od.NOT_INITIALIZED;
     s_odom.imu_ready = false;
-    s_odom.fusion_ready = false;
     s_odom.static_window = false;
     s_odom.timing_valid = false;
     s_odom.acc_valid = false;
@@ -187,6 +192,9 @@ OdomStatus odom_process(void) {
     s_odom.wheel_corrected = (Vector3){ wheel.velocity.vx, wheel.velocity.vy, wheel.velocity.wz };
     s_odom.wheel_fusion = s_odom.wheel_corrected;
     s_odom.wheel_fusion.z *= s_config.wheel_yaw_rate_scale;
+
+    if(s_config.wheel_only) return odom_process_wheels(&wheel);
+    s_odom.fusion_ready = false;
 
     const SteerWheelControl* command = chassis.get_control();
     const bool command_stopped = command != NULL && command->vx == 0.0f &&
@@ -360,7 +368,8 @@ OdomStatus odom_relocalize_xy(float x_m, float y_m) {
     if(!odom_is_ready()) return od.NOT_READY;
     if(!isfinite(x_m) || !isfinite(y_m)) return od.INVALID_PARAM;
     const Vector3 position = { x_m, y_m, s_odom.odom.z };
-    if(chassis_imu_odom.reset_odom(&s_fusion, position) != chassis_imu_odom.OK) {
+    if(!s_config.wheel_only &&
+       chassis_imu_odom.reset_odom(&s_fusion, position) != chassis_imu_odom.OK) {
         return od.FUSION_FAILED;
     }
     s_odom.odom = position;
@@ -391,7 +400,7 @@ const Odom* odom_get_state(void) {
  * @return false 数据尚未可用
  */
 bool odom_is_ready(void) {
-    return s_odom.initialized && s_odom.imu_ready && s_odom.fusion_ready;
+    return s_odom.initialized && s_odom.fusion_ready;
 }
 
 /**
@@ -497,6 +506,61 @@ static bool odom_resolve_process_dt_s(const ImuSample* sample, float* dt_s) {
 
 static bool odom_finite_vec3(Vector3 value) {
     return isfinite(value.x) && isfinite(value.y) && isfinite(value.z);
+}
+
+/* Each timestamp is the oldest of the four steering and four drive feedbacks.
+   Integrate once it advances. Zero or missing feedback never implies motion. */
+static OdomStatus odom_process_wheels(const ChassisObservation* wheel) {
+    const uint32_t max_gap_ms = (uint32_t)(ODOM_MAX_PROCESS_DT_S * 1000.0f);
+    const Vector3 twist = s_odom.wheel_fusion;
+    const uint32_t elapsed_ms = wheel->sample_time_ms - s_last_wheel_time_ms;
+    s_odom.process_dt_s = 0.0f;
+    s_odom.sample_time_us = wheel->sample_time_ms * 1000u;
+
+    if(!s_odom.wheel_valid || !odom_finite_vec3(twist) || wheel->age_ms > max_gap_ms ||
+       (s_wheel_sequence_seen && elapsed_ms > max_gap_ms)) {
+        if(s_wheel_sequence_seen) ++s_odom.discontinuity_count;
+        s_wheel_sequence_seen = false;
+        s_odom.fusion_ready = false;
+        s_odom.velocity = (Vector3){ 0 };
+        return od.NOT_READY;
+    }
+    if(!s_wheel_sequence_seen) {
+        s_last_wheel_time_ms = wheel->sample_time_ms;
+        s_last_wheel_sequence = wheel->sample_sequence;
+        s_wheel_sequence_seen = true;
+        s_odom.velocity = twist;
+        return od.NOT_READY;
+    }
+    if(elapsed_ms == 0u || wheel->sample_sequence == s_last_wheel_sequence) {
+        s_odom.timing_valid = s_odom.fusion_ready;
+        return s_odom.fusion_ready ? od.OK : od.NOT_READY;
+    }
+
+    const float dt = (float)elapsed_ms * 0.001f;
+    const Vector3 previous = s_odom.velocity;
+    const float dyaw = 0.5f * (previous.z + twist.z) * dt;
+    const float yaw_mid = s_odom.angle.z + 0.5f * dyaw;
+    const float dx_body = 0.5f * (previous.x + twist.x) * dt;
+    const float dy_body = 0.5f * (previous.y + twist.y) * dt;
+    const float c = cosf(yaw_mid);
+    const float s = sinf(yaw_mid);
+    s_odom.odom.x += c * dx_body - s * dy_body;
+    s_odom.odom.y += s * dx_body + c * dy_body;
+    const float pi = 3.14159265359f;
+    float yaw = fmodf(s_odom.angle.z + dyaw, 2.0f * pi);
+    if(yaw > pi) yaw -= 2.0f * pi;
+    else if(yaw < -pi) yaw += 2.0f * pi;
+    s_odom.angle.z = yaw;
+    s_odom.wheel_yaw_integral_rad += dyaw;
+    s_odom.yaw_integrated_time_s += dt;
+    ++s_odom.yaw_integrated_samples;
+    s_odom.process_dt_s = dt;
+    s_odom.velocity = twist;
+    s_odom.fusion_ready = s_odom.timing_valid = true;
+    s_last_wheel_sequence = wheel->sample_sequence;
+    s_last_wheel_time_ms = wheel->sample_time_ms;
+    return od.OK;
 }
 
 /* Diagnostics use the real, scaled inputs even while fusion holds a stationary

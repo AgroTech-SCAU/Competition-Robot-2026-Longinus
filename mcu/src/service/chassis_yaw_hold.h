@@ -32,6 +32,8 @@ typedef struct {
  * @return ChassisYawHoldConfig 默认配置
  */
 ChassisYawHoldConfig chassis_yaw_hold_default_config(void);
+/** 舵轮反馈同时提供航向与角速度时使用的航向保持参数。 */
+ChassisYawHoldConfig chassis_yaw_hold_wheel_config(void);
 
 /**
  * @brief 初始化航向保持模块
@@ -71,10 +73,10 @@ void chassis_yaw_hold_reset(void);
  * @param vy_cmd 底盘 y 方向速度命令，单位 m/s
  * @param wz_cmd 用户原始旋转命令，单位 rad/s
  * @param yaw 当前 yaw，单位 rad
- * @param gyro_z_corrected 当前 z 轴角速度，单位 rad/s
+ * @param measured_wz 实测底盘 z 轴角速度，单位 rad/s
  * @return float 叠加角度环后的目标角速度
  */
-float chassis_yaw_hold_apply(float vx_cmd, float vy_cmd, float wz_cmd, float yaw, float gyro_z_corrected, float dt_s);
+float chassis_yaw_hold_apply(float vx_cmd, float vy_cmd, float wz_cmd, float yaw, float measured_wz, float dt_s);
 
 /**
  * @brief 查询航向保持是否处于激活状态

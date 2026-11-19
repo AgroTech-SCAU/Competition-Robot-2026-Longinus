@@ -15,6 +15,7 @@
 
 static uint32_t test_now;
 static bool test_online, test_clear_event, test_clear_active;
+static bool test_key_pressed;
 static bool test_laser_online;
 static bool test_output_enabled, test_motor_ready;
 static unsigned test_enable_calls, test_zero_calls, test_manual_calls, test_auto_calls;
@@ -59,7 +60,7 @@ const struct ChassisInterface chassis_interface = {
 };
 static const Odom* odom_state(void) { return &test_odom; }
 static bool odom_ready(void) {
-    return test_odom.imu_ready && test_odom.timing_valid && test_odom.fusion_ready;
+    return test_odom.wheel_valid && test_odom.timing_valid && test_odom.fusion_ready;
 }
 const struct OdomInterface odom_interface = { .get_state = odom_state, .is_ready = odom_ready };
 
@@ -85,6 +86,7 @@ AppControlResult app_odom_test_process(void) {
 static void reset_fixture(void) {
     test_now = 0u;
     test_online = true;
+    test_key_pressed = false;
     test_laser_online = true;
     test_clear_event = test_clear_active = false;
     test_output_enabled = test_motor_ready = false;
@@ -97,23 +99,19 @@ static void reset_fixture(void) {
 }
 static void step(uint32_t elapsed_ms) {
     test_now += elapsed_ms;
-    app_runtime_process();
+    app_runtime_process(test_key_pressed);
 }
-static void imu_ready(void) { test_odom.imu_ready = test_odom.timing_valid = true; }
-static void all_ready(void) { imu_ready(); test_motor_ready = test_odom.fusion_ready = true; }
+static void all_ready(void) {
+    test_odom.wheel_valid = test_odom.timing_valid = true;
+    test_motor_ready = test_odom.fusion_ready = true;
+}
 
 static void test_level_selection_wait_and_prepare(void) {
     reset_fixture();
+    test_remote.channel[REMOTE_CH_RIGHT_X] = REMOTE_CENTER + REMOTE_DEADBAND + 1u;
     step(2u);
     assert(app_runtime_get_state() == APP_FSM_STATE_MANUAL);
     assert(!test_output_enabled && test_enable_calls == 0u && !app_runtime_has_fault());
-    step(10000u); /* Calibration waiting is not the 3-second motor preparation. */
-    assert(!test_output_enabled && !app_runtime_has_fault());
-    test_odom.imu_ready = true;
-    step(2u); /* Valid timing is also required before any enable. */
-    assert(!test_output_enabled);
-    test_odom.timing_valid = true;
-    test_remote.channel[REMOTE_CH_RIGHT_X] = REMOTE_CENTER + REMOTE_DEADBAND + 1u;
     step(10000u);
     assert(!test_output_enabled && !app_runtime_has_fault());
     test_remote.channel[REMOTE_CH_RIGHT_X] = REMOTE_CENTER;
@@ -124,7 +122,7 @@ static void test_level_selection_wait_and_prepare(void) {
     test_motor_ready = true;
     step(2u);
     assert(test_manual_calls == 0u); /* Motor-ready alone must not release zero hold. */
-    test_odom.fusion_ready = true;
+    all_ready(); /* This firmware has no IMU even after motor preparation. */
     step(2u);
     assert(test_manual_calls == 0u);
     step(2u);
@@ -139,14 +137,11 @@ static void test_level_selection_wait_and_prepare(void) {
 static void test_actual_preparation_timeout_and_nonzero_stick(void) {
     reset_fixture();
     step(12000u);
-    imu_ready();
-    step(2u);
     step(2999u);
     assert(!app_runtime_has_fault());
     step(1u);
     assert(app_runtime_get_state() == APP_FSM_STATE_FAULT && !test_output_enabled);
     reset_fixture();
-    imu_ready();
     step(2u);
     test_remote.channel[REMOTE_CH_LEFT_X] = 1600u;
     step(2u);
@@ -158,11 +153,11 @@ static void test_fault_clear_and_held_stop(void) {
     all_ready();
     step(2u);
     step(2u);
-    test_odom.imu_ready = false;
+    test_odom.wheel_valid = false;
     step(2u);
     assert(app_runtime_get_state() == APP_FSM_STATE_FAULT && !test_output_enabled);
     const unsigned enable_count = test_enable_calls;
-    imu_ready();
+    all_ready();
     step(10000u);
     assert(app_runtime_has_fault() && test_enable_calls == enable_count);
     test_clear_event = test_clear_active = true;
@@ -214,11 +209,71 @@ static void test_offline_and_existing_auto_flow(void) {
     assert(test_manual_calls == 1u);
 }
 
+static void key_level(bool pressed, uint32_t duration_ms) {
+    test_key_pressed = pressed;
+    step(2u);
+    step(duration_ms);
+}
+
+static void test_local_start_and_stop(void) {
+    reset_fixture();
+    all_ready();
+    test_online = false;
+    key_level(true, 500u); /* Held across power on. */
+    key_level(false, 3u);
+    key_level(true, 40u);
+    assert(app_runtime_get_state() == APP_FSM_STATE_IDLE && !test_output_enabled);
+    key_level(false, 31u);
+    key_level(true, 5u);
+    key_level(false, 3u);
+    key_level(true, 29u);
+    assert(!test_output_enabled);
+    step(1u);
+    assert(app_runtime_get_state() == APP_FSM_STATE_AUTO && test_zero_calls == 1u);
+    step(2u);
+    assert(test_auto_calls == 1u && app_runtime_is_self_check_passed());
+    test_online = true;  /* A receiver appearing mid-race cannot select Manual. */
+    key_level(true, 100u);
+    assert(app_runtime_get_state() == APP_FSM_STATE_AUTO && test_manual_calls == 0u);
+    key_level(false, 35u);
+    key_level(true, 35u);
+    assert(app_runtime_get_state() == APP_FSM_STATE_ESTOP && !test_output_enabled);
+    key_level(false, 35u);
+    key_level(true, 35u);
+    assert(app_runtime_get_state() == APP_FSM_STATE_ESTOP && !test_output_enabled);
+}
+
+static void test_key_ownership_and_fault(void) {
+    reset_fixture();
+    all_ready();
+    test_remote.channel[REMOTE_CH_SWD] = REMOTE_CENTER;
+    key_level(false, 50u);
+    key_level(true, 50u); /* Online Idle belongs to the radio. */
+    assert(app_runtime_get_state() == APP_FSM_STATE_IDLE && !test_output_enabled);
+    test_online = false;
+    step(100u);
+    assert(app_runtime_get_state() == APP_FSM_STATE_IDLE);
+    key_level(false, 50u);
+    key_level(true, 50u);
+    step(2u);
+    assert(test_auto_calls == 1u);
+    test_odom.wheel_valid = false;
+    step(2u);
+    assert(app_runtime_get_state() == APP_FSM_STATE_FAULT && !test_output_enabled);
+    all_ready();
+    test_online = test_clear_event = test_clear_active = true;
+    key_level(false, 50u);
+    key_level(true, 50u);
+    assert(app_runtime_get_state() == APP_FSM_STATE_FAULT && !test_output_enabled);
+}
+
 int main(void) {
+    test_local_start_and_stop();
+    test_key_ownership_and_fault();
     test_level_selection_wait_and_prepare();
     test_actual_preparation_timeout_and_nonzero_stick();
     test_fault_clear_and_held_stop();
     test_offline_and_existing_auto_flow();
-    puts("PASS runtime: level Manual, calibration/centering wait, zero preparation, held Stop, fault latch and Auto");
+    puts("PASS runtime: local key, ownership, EStop, RC safety, wheel startup and Auto");
     return 0;
 }

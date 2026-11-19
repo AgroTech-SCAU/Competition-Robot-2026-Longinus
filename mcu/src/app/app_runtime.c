@@ -17,7 +17,13 @@
 
 #define APP_RUNTIME_STARTUP_TIMEOUT_MS 3000u
 #define APP_RUNTIME_STOP_RETRY_MS 100u
+#define APP_RUNTIME_KEY_DEBOUNCE_MS 30u
 
+/* A locally started race owns the controls through finish or fault, until reset. */
+static bool s_local_race;
+static bool s_key_candidate_pressed;
+static bool s_key_armed;
+static ms_t s_key_changed_ms;
 static bool s_waiting_ready = false;
 static bool s_motor_starting = false;
 static ms_t s_motor_start_since_ms = 0u;
@@ -35,6 +41,10 @@ static void app_runtime_raise_fault(AppFaultSource source, int32_t code);
 static void app_runtime_stop(bool force);
 
 void app_runtime_init(void) {
+    s_local_race = false;
+    s_key_candidate_pressed = true;
+    s_key_armed = false; /* Observe a stable release before the first press. */
+    s_key_changed_ms = delay_now_ms();
     s_waiting_ready = false;
     s_motor_starting = false;
     s_motor_start_since_ms = 0u;
@@ -47,7 +57,23 @@ void app_runtime_init(void) {
     app_fsm_init();
 }
 
-void app_runtime_process(void) {
+static bool app_runtime_key_press(bool pressed, ms_t now) {
+    if(pressed != s_key_candidate_pressed) {
+        s_key_candidate_pressed = pressed;
+        s_key_changed_ms = now;
+    }
+    if((ms_t)(now - s_key_changed_ms) < APP_RUNTIME_KEY_DEBOUNCE_MS) return false;
+    if(!pressed) {
+        s_key_armed = true;
+        return false;
+    }
+    if(!s_key_armed) return false;
+    s_key_armed = false;
+    return true;
+}
+
+void app_runtime_process(bool local_key_pressed) {
+    const bool key_event = app_runtime_key_press(local_key_pressed, delay_now_ms());
     const bool online = remote_is_online(100u);
     const bool manual_request = remote_is_manual_requested();
     const bool auto_request = remote_is_auto_requested();
@@ -55,10 +81,24 @@ void app_runtime_process(void) {
     ChassisErrorCode status;
 
     s_stop_attempted_this_cycle = false;
-    if(!online) {
+    if(s_local_race) {
+        if(key_event && app_fsm_get_state() == APP_FSM_STATE_AUTO) {
+            (void)app_fsm_request_estop();
+            app_fsm_process();
+            app_runtime_stop(true);
+            return;
+        }
+    }
+    else if(!online) {
         if(app_fsm_get_state() == APP_FSM_STATE_MANUAL || app_fsm_get_state() == APP_FSM_STATE_AUTO) {
             app_runtime_raise_fault(APP_FAULT_SOURCE_REMOTE, 1);
             return;
+        }
+        if(key_event && app_fsm_get_state() == APP_FSM_STATE_IDLE &&
+           app_fsm_post(APP_FSM_EVENT_SWITCH_TO_AUTO)) {
+            s_local_race = true;
+            s_waiting_ready = true;
+            log_info("AUTO local key start");
         }
     }
     else if(remote_take_clear_reset_event()) {
@@ -139,15 +179,10 @@ void app_runtime_process(void) {
         return;
     }
 
-    /* Disabled steering motors may stop reporting. Allow only the bounded
-       zero-target preparation after IMU calibration; require full odometry
-       before leaving that preparation or applying any driving command. */
-    const Odom* estimate = odom.get_state();
+    /* Disabled steering motors may be silent. Zero-target preparation enables
+       their feedback; driving starts after wheel odometry has advanced. */
     if(s_waiting_ready) {
-        /* Calibration can complete with output disabled in either mode.
-           The preparation timeout starts when the IMU and timing are ready. */
-        if(!estimate->imu_ready || !estimate->timing_valid ||
-           (manual_mode && !app_runtime_sticks_centered())) {
+        if(manual_mode && !app_runtime_sticks_centered()) {
             status = chassis_poll_feedback();
             if(status != CHASSIS_OK) app_runtime_raise_fault(APP_FAULT_SOURCE_CHASSIS, status);
             return;
@@ -156,8 +191,7 @@ void app_runtime_process(void) {
         s_motor_starting = true;
         s_motor_start_since_ms = delay_now_ms();
     }
-    if(!estimate->imu_ready || !estimate->timing_valid ||
-       (!s_motor_starting && !odom.is_ready())) {
+    if(!s_motor_starting && !odom.is_ready()) {
         app_runtime_raise_fault(APP_FAULT_SOURCE_ODOM, 1);
         return;
     }
@@ -165,7 +199,7 @@ void app_runtime_process(void) {
     /* Preparation now advances one nonblocking step per cycle. Check every
        startup precondition before that step can issue a hardware command */
     if((manual_mode && !remote_is_manual_requested()) ||
-       (auto_mode && !remote_is_auto_requested())) {
+       (auto_mode && !s_local_race && !remote_is_auto_requested())) {
         app_runtime_raise_fault(APP_FAULT_SOURCE_REMOTE, 1);
         return;
     }
@@ -186,7 +220,7 @@ void app_runtime_process(void) {
     }
 
     if((manual_mode && !remote_is_manual_requested()) ||
-       (auto_mode && !remote_is_auto_requested())) {
+       (auto_mode && !s_local_race && !remote_is_auto_requested())) {
         app_runtime_raise_fault(APP_FAULT_SOURCE_REMOTE, 1);
         return;
     }
@@ -239,9 +273,9 @@ bool app_runtime_has_fault(void) {
 }
 
 bool app_runtime_is_self_check_passed(void) {
+    /* Laser ranging is optional telemetry during open-field wheel-only runs. */
     return !app_fsm_has_fault() && app_fsm_get_state() != APP_FSM_STATE_ESTOP &&
-           remote_is_online(100u) && odom.is_ready() && chassis.is_self_check_passed() &&
-           laser_odom_is_online();
+           (s_local_race || remote_is_online(100u)) && odom.is_ready() && chassis.is_self_check_passed();
 }
 
 static bool app_runtime_sticks_centered(void) {
@@ -299,9 +333,8 @@ static void app_runtime_raise_fault(AppFaultSource source, int32_t code) {
     }
     app_runtime_stop(new_fault);
     if(new_fault && source == APP_FAULT_SOURCE_ODOM && code == 1) {
-        log_warn("ODOM SNAP prep=%u cal=%u imu=%u tim=%u fus=%u wh=%u age_ms=%lu dt_ms=%.1f gap=%lu",
-                 s_odom_fault_was_starting ? 1u : 0u, s_odom_fault_snapshot.imu_calibrated ? 1u : 0u,
-                 s_odom_fault_snapshot.imu_ready ? 1u : 0u, s_odom_fault_snapshot.timing_valid ? 1u : 0u,
+        log_warn("WHEEL ODOM prep=%u tim=%u pose=%u wh=%u age_ms=%lu dt_ms=%.1f gap=%lu",
+                 s_odom_fault_was_starting ? 1u : 0u, s_odom_fault_snapshot.timing_valid ? 1u : 0u,
                  s_odom_fault_snapshot.fusion_ready ? 1u : 0u, s_odom_fault_snapshot.wheel_valid ? 1u : 0u,
                  (unsigned long)s_odom_fault_snapshot.wheel_age_ms,
                  (double)s_odom_fault_snapshot.process_dt_s * 1000.0,
