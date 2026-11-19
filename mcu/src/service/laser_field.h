@@ -4,7 +4,7 @@
 #include "laser_odom.h"
 
 /* Near-range floor for the Auto adapter, in millimetres. */
-#define LASER_FIELD_MIN_RANGE_MM 10u
+#define LASER_FIELD_MIN_RANGE_MM 30u
 
 typedef struct {
     float x_m;

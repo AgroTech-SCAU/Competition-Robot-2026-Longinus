@@ -139,7 +139,7 @@ SystemStatus assemble_chassis(void) {
         /* Scale former gains (-0.096, 0.058) by 129/192 to preserve the proven
          * translation correction at each wheel: k_new * arm_new = k_old * arm_old.
          * FK applies these same gains for the inverse observation correction. */
-        .yaw_bias = { .enabled = true, .k_vx = -0.09f, .k_vy = 0.02f, .v_deadband = 0.01f },
+        .yaw_bias = { .enabled = true, .k_vx = -0.069f, .k_vy =0.03f, .v_deadband = 0.01f },
     };
     BusMotorStatus status;
     log_info("CHASSIS assemble begin");
