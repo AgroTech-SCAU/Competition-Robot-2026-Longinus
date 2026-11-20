@@ -19,8 +19,9 @@ typedef struct {
     LaserBeam control_beam; /* Travel target; FRONT+REAR are combined when gated. */
     bool furrow_gate;       /* Front+rear=95..125 mm acquires dual-beam centering. */
     bool rear_escape;       /* Rear 30 mm protection only on 05/07/.../15. */
-    bool work_stop;         /* Service each furrow on its first traversal. */
+    bool work_stop;         /* Enable the mid-furrow laser work stop. */
     bool endpoint_side_trim; /* Require side-wall alignment before changing legs. */
+    float wheel_extra_m;    /* Extra wheel travel before alignment at the same wall. */
 } MapRouteLeg;
 
 extern const MapRouteLeg map_route[];

@@ -292,11 +292,28 @@ static void test_wheel_finishes_entry_despite_laser_noise(void) {
     send_ranges(62u, FURROW_REAR_MM, 39u, RIGHT_TARGET_MM);
     process();
     assert(command.x == 0.0f && command.y == 0.0f);
-    for(unsigned i = 0; i < 60u && app_odom_test_get_laser_fix().segment == 1u; ++i) {
+    assert(!app_odom_test_entry_pump_enabled());
+    assert(!app_odom_test_entry_pa0_enabled());
+    uint32_t pump_started_ms = 0u, slot_started_ms = 0u, pump_finished_ms = 0u;
+    for(unsigned i = 0; i < 1560u && app_odom_test_get_laser_fix().segment == 1u; ++i) {
         step_with_ranges(i % 2u ? 62u : 108u, FURROW_REAR_MM,
                          i % 2u ? 39u : 43u, RIGHT_TARGET_MM);
         assert(command.x == 0.0f);
+        const bool slot_enabled = app_odom_test_entry_pa0_enabled();
+        if(app_odom_test_entry_pump_enabled()) {
+            if(pump_started_ms == 0u) pump_started_ms = now_ms;
+            if(slot_enabled && slot_started_ms == 0u) slot_started_ms = now_ms;
+            assert(slot_enabled == (now_ms - pump_started_ms >= 1000u));
+            assert(app_odom_test_get_laser_fix().segment == 1u);
+            assert(command.y == 0.0f && command.z == 0.0f);
+        }
+        else if(pump_started_ms != 0u && pump_finished_ms == 0u) {
+            pump_finished_ms = now_ms;
+        }
+        if(pump_finished_ms != 0u) assert(!slot_enabled);
     }
+    assert(pump_started_ms != 0u && slot_started_ms - pump_started_ms == 1000u);
+    assert(pump_finished_ms - slot_started_ms == 2000u);
     assert(app_odom_test_get_laser_fix().segment == 2u);
 }
 static void test_connectors_do_not_track_previous_front_wall(void) {
@@ -363,7 +380,7 @@ static void test_work_stop_and_resume(void) {
     position.x = 1.3f - 4.9f;
     velocity = (Vector3){ 0 };
     process();
-    run_ideal_cycles(60u);
+    run_ideal_cycles(1560u);
     assert(app_odom_test_get_laser_fix().segment == 2u);
     app_odom_test_set_work_range(true, 350u, now_ms);
     process();
@@ -383,7 +400,7 @@ static void test_work_stop_and_resume(void) {
     process();
     assert(command.y == 0.0f && app_odom_test_work_pump_enabled());
 
-    now_ms += 1999u;
+    now_ms += 999u;
     process();
     assert(command.y == 0.0f && app_odom_test_work_pump_enabled());
     ++now_ms;
@@ -413,7 +430,13 @@ static void test_first_furrow_return_and_right_wall(void) {
         assert(command.y < -0.40f && !app_odom_test_work_pump_enabled());
     }
 
-    /* Two of three recent frames see the body-right wall: slow with no raw escape. */
+    /* Begin braking inside 400 mm, while the raw escape guard is still inactive. */
+    step_with_ranges(FURROW_FRONT_MM, FURROW_REAR_MM, 380u, RIGHT_TARGET_MM);
+    assert(command.y < -0.445f);
+    step_with_ranges(FURROW_FRONT_MM, FURROW_REAR_MM, 380u, RIGHT_TARGET_MM);
+    assert(command.y > -0.445f && command.y < -0.42f);
+
+    /* Two of three recent frames see the closer wall: slow further. */
     step_with_ranges(FURROW_FRONT_MM, FURROW_REAR_MM, 120u, RIGHT_TARGET_MM);
     assert(command.y < -0.40f);
     step_with_ranges(FURROW_FRONT_MM, FURROW_REAR_MM, 120u, RIGHT_TARGET_MM);
@@ -426,14 +449,34 @@ static void test_first_furrow_return_and_right_wall(void) {
     assert(command.y == 0.0f && app_odom_test_remaining_m() > 0.08f);
     assert(app_odom_test_get_laser_fix().segment == 3u);
 
-    /* The near-wall stop can begin in the wheel end window. The west side
-     * still has to reach its own target before starting 04. */
-    position.y -= app_odom_test_remaining_m() - 0.060f;
-    for(unsigned i = 0; i < 60u; ++i) {
+    /* Contact with the expected wall can start a stop despite a short wheel
+     * reading. The raw guard still backs away first. */
+    position.y -= app_odom_test_remaining_m() - 0.200f;
+    step_with_ranges(FURROW_FRONT_MM, FURROW_REAR_MM, 29u, RIGHT_TARGET_MM);
+    assert(app_odom_test_get_laser_fix().jump_mask == (1u << LASER_LEFT));
+    assert(command.y >= 0.015f);
+    for(unsigned i = 0; i < 120u; ++i) {
         step_with_ranges(FURROW_FRONT_MM, FURROW_REAR_MM, 48u, RIGHT_TARGET_MM);
         assert(app_odom_test_get_laser_fix().segment == 3u);
     }
     assert(command.y < 0.0f);
+
+    /* Stall the first trim until its time limit. A brief new side contact
+     * followed by valid clearance can give alignment another bounded attempt. */
+    const float stalled_y = position.y;
+    for(unsigned i = 0; i < 2800u; ++i) {
+        position.y = stalled_y;
+        step_with_ranges(FURROW_FRONT_MM, FURROW_REAR_MM, 48u, RIGHT_TARGET_MM);
+    }
+    assert(command.y == 0.0f && app_odom_test_get_laser_fix().segment == 3u);
+    step_with_ranges(FURROW_FRONT_MM, FURROW_REAR_MM, 29u, RIGHT_TARGET_MM);
+    assert(command.y >= 0.015f && app_odom_test_get_laser_fix().jump_mask == (1u << LASER_LEFT));
+    for(unsigned i = 0; i < 10u; ++i) {
+        step_with_ranges(FURROW_FRONT_MM, FURROW_REAR_MM, 48u, RIGHT_TARGET_MM);
+        assert(app_odom_test_get_laser_fix().segment == 3u);
+    }
+    assert(command.y < 0.0f);
+
     for(unsigned i = 0; i < 60u && app_odom_test_get_laser_fix().segment == 3u; ++i) {
         step_with_ranges(FURROW_FRONT_MM, FURROW_REAR_MM, LEFT_TARGET_MM, RIGHT_TARGET_MM);
     }
@@ -455,7 +498,7 @@ static void step_east_wall(uint16_t range_mm) {
     step_with_ranges(68u, 41u, LEFT_TARGET_MM, range_mm);
 }
 
-static void prepare_eastbound_approach(unsigned leg, float remaining_m) {
+static float prepare_eastbound_approach(unsigned leg, float remaining_m) {
     reset();
     for(unsigned i = 0; i < 30000u && app_odom_test_get_laser_fix().segment < leg; ++i) {
         advance();
@@ -463,9 +506,11 @@ static void prepare_eastbound_approach(unsigned leg, float remaining_m) {
         process();
     }
     assert(app_odom_test_get_laser_fix().segment == leg);
+    const float wheel_target = app_odom_test_remaining_m();
     run_ideal_cycles(30u);
     position.y += app_odom_test_remaining_m() - remaining_m;
     velocity = (Vector3){ 0 };
+    return wheel_target;
 }
 
 static void reach_eastbound_endpoint(unsigned leg, uint16_t range_mm) {
@@ -570,6 +615,39 @@ static void test_east_wall_trim_requires_confirmation(void) {
     assert(app_odom_test_get_laser_fix().segment == 6u);
 }
 
+static void test_leg09_uses_longer_wheel_target_and_east_wall_trim(void) {
+    const float wheel_target = prepare_eastbound_approach(9u, 0.10f);
+    assert(fabsf(wheel_target - 2.70f) < 0.001f);
+    step_east_wall(58u);
+    assert(command.y > 0.0f && app_odom_test_remaining_m() > 0.095f);
+
+    position.y += app_odom_test_remaining_m();
+    velocity = (Vector3){ 0 };
+    send_ranges(68u, 41u, LEFT_TARGET_MM, 58u);
+    process();
+    assert(command.x == 0.0f && command.y == 0.0f);
+    const float wheel_endpoint = position.y;
+    for(unsigned i = 0; i < 75u; ++i) {
+        position.y = wheel_endpoint;
+        step_east_wall(58u);
+        assert(app_odom_test_get_laser_fix().segment == 9u);
+    }
+    assert(command.x == 0.0f && command.y > 0.0f && command.y <= 0.04f);
+    assert(app_odom_test_get_laser_fix().track_mask == (1u << LASER_RIGHT));
+
+    for(unsigned i = 0; i < 49u; ++i) {
+        step_east_wall(RIGHT_TARGET_MM);
+        assert(app_odom_test_get_laser_fix().segment == 9u);
+    }
+    for(unsigned i = 0; i < 10u && app_odom_test_get_laser_fix().segment == 9u; ++i) {
+        step_east_wall(RIGHT_TARGET_MM);
+    }
+    assert(app_odom_test_get_laser_fix().segment == 10u);
+    for(unsigned i = 0; i < 8u; ++i) step_east_wall(55u);
+    assert(command.x > 0.0f && command.y > 0.0f);
+    assert(app_odom_test_get_laser_fix().track_mask == (1u << LASER_RIGHT));
+}
+
 static void test_east_wall_trim_safety_and_resume(void) {
     for(unsigned fault = 0; fault < 3u; ++fault) {
         reach_eastbound_endpoint(5u, 104u);
@@ -631,6 +709,8 @@ static void test_route(float lag_s) {
     unsigned leg = 1u, seen = 0u;
     unsigned direction_mask = 0u;
     bool heading_recovered = false;
+    bool exit_wall_trim_seen = false;
+    uint32_t exit_wall_target_ms = 0u;
     uint32_t yaw_disturbance_ms = 0u;
     float max_stop_error = 0.0f;
     Point p = field_position();
@@ -641,15 +721,30 @@ static void test_route(float lag_s) {
             /* The nominal run includes 05's east wall and one narrow furrow. */
             const uint16_t front = leg == 7u ? NARROW_FRONT_MM : FURROW_FRONT_MM;
             const uint16_t rear = leg == 7u ? NARROW_REAR_MM : FURROW_REAR_MM;
-            send_route_ranges(leg, leg == 1u ? FAR_WALL_MM : front, rear);
+            if(leg == 15u && p.x - waypoints[leg].x < 0.15f) {
+                /* Keep the west beam out of band until the final crossing starts trimming. */
+                send_ranges(front, rear, exit_wall_trim_seen ? LEFT_TARGET_MM : 58u, RIGHT_TARGET_MM);
+                if(exit_wall_trim_seen && exit_wall_target_ms == 0u) exit_wall_target_ms = now_ms;
+            }
+            else {
+                send_route_ranges(leg, leg == 1u ? FAR_WALL_MM : front, rear);
+            }
         }
+        if(leg == 15u) app_odom_test_set_work_range(true, 350u, now_ms);
         process();
+        if(leg == 15u && p.x > 1.0f && p.x < 2.0f) {
+            assert(command.y < 0.0f && !app_odom_test_work_pump_enabled());
+        }
+        if(leg == 15u && command.y < 0.0f && app_odom_test_get_laser_fix().track_mask == (1u << LASER_LEFT)) {
+            exit_wall_trim_seen = true;
+        }
         const float dx = waypoints[leg].x - waypoints[leg - 1u].x;
         const float dy = waypoints[leg].y - waypoints[leg - 1u].y;
         const float main_command = dx != 0.0f ? command.y * copysignf(1.0f, dx) :
                                                 -command.x * copysignf(1.0f, dy);
         if(main_command > 0.05f) direction_mask |= 1u << (leg - 1u);
         if(leg < LEG_COUNT && app_odom_test_get_laser_fix().segment == leg + 1u) {
+            if(leg == 15u) assert(exit_wall_target_ms != 0u && now_ms - exit_wall_target_ms >= 100u);
             const float endpoint_error = hypotf(p.x - waypoints[leg].x, p.y - waypoints[leg].y);
             max_stop_error = fmaxf(max_stop_error, endpoint_error);
             assert(endpoint_error < 0.035f);
@@ -698,6 +793,7 @@ int main(void) {
     test_east_wall_endpoint_trim();
     test_east_wall_trim_limits();
     test_east_wall_trim_requires_confirmation();
+    test_leg09_uses_longer_wheel_target_and_east_wall_trim();
     test_east_wall_trim_safety_and_resume();
     test_east_wall_trim_needs_a_fresh_release_frame();
     test_route(0.0f);

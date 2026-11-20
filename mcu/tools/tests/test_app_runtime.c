@@ -23,9 +23,11 @@ static uint8_t test_pump_relays;
 static unsigned test_enable_calls, test_zero_calls, test_manual_calls, test_auto_calls;
 static FsIa10bData test_remote;
 static Odom test_odom;
+static LaserOdomSample test_laser;
 static AppControlResult test_auto_result;
 
 ms_t delay_now_ms(void) { return test_now; }
+const LaserOdomSample* laser_odom_get_sample(void) { return &test_laser; }
 bool laser_odom_is_online(void) { return test_laser_online; }
 bool remote_is_online(uint32_t timeout_ms) { (void)timeout_ms; return test_online; }
 bool remote_is_manual_requested(void) {
@@ -103,6 +105,7 @@ static void reset_fixture(void) {
     test_auto_result = APP_CONTROL_RESULT_OK;
     test_enable_calls = test_zero_calls = test_manual_calls = test_auto_calls = 0u;
     memset(&test_odom, 0, sizeof(test_odom));
+    memset(&test_laser, 0, sizeof(test_laser));
     memset(&test_remote, 0, sizeof(test_remote));
     for(unsigned i = 0u; i < FS_IA10B_CHANNEL_COUNT; ++i) test_remote.channel[i] = REMOTE_CENTER;
     test_remote.channel[REMOTE_CH_SWD] = REMOTE_SW_HIGH; /* CH8 negative selects Manual. */
@@ -116,6 +119,90 @@ static void step(uint32_t elapsed_ms) {
 static void all_ready(void) {
     test_odom.wheel_valid = test_odom.timing_valid = true;
     test_motor_ready = test_odom.fusion_ready = true;
+}
+
+static void side_laser_frame(uint16_t left_mm, uint16_t right_mm) {
+    test_laser.distance_mm[LASER_LEFT] = left_mm;
+    test_laser.distance_mm[LASER_RIGHT] = right_mm;
+    test_laser.valid_mask = (left_mm <= LASER_MAX_RANGE_MM ? 1u << LASER_LEFT : 0u) |
+                            (right_mm <= LASER_MAX_RANGE_MM ? 1u << LASER_RIGHT : 0u);
+    test_laser.stamp_ms = test_now;
+    ++test_laser.received;
+    step(2u);
+}
+
+static void start_radio_auto(void) {
+    test_remote.channel[REMOTE_CH_SWD] = REMOTE_SW_LOW;
+    step(2u);
+    for(unsigned i = 0; i < 3u; ++i) side_laser_frame(39u, 35u);
+}
+
+static void test_side_lasers_start_radio_auto(void) {
+    reset_fixture();
+    all_ready();
+    test_remote.channel[REMOTE_CH_SWD] = REMOTE_CENTER;
+    for(unsigned i = 0; i < 3u; ++i) side_laser_frame(49u, 48u);
+    assert(app_runtime_get_state() == APP_FSM_STATE_IDLE && test_enable_calls == 0u);
+
+    test_remote.channel[REMOTE_CH_SWD] = REMOTE_SW_LOW;
+    step(2u);
+    side_laser_frame(49u, 48u);
+    side_laser_frame(49u, 48u);
+    for(unsigned i = 0; i < 4u; ++i) step(2u);
+    assert(app_runtime_get_state() == APP_FSM_STATE_IDLE && test_enable_calls == 0u);
+
+    side_laser_frame(86u, 48u);
+    side_laser_frame(49u, 48u);
+    side_laser_frame(49u, 48u);
+    assert(app_runtime_get_state() == APP_FSM_STATE_IDLE && test_enable_calls == 0u);
+    side_laser_frame(49u, 29u);
+    side_laser_frame(49u, 48u);
+    side_laser_frame(49u, 48u);
+    assert(app_runtime_get_state() == APP_FSM_STATE_IDLE && test_enable_calls == 0u);
+
+    step(121u);
+    side_laser_frame(30u, 85u);
+    side_laser_frame(85u, 30u);
+    assert(app_runtime_get_state() == APP_FSM_STATE_IDLE && test_enable_calls == 0u);
+    side_laser_frame(85u, 85u);
+    assert(app_runtime_get_state() == APP_FSM_STATE_AUTO && test_zero_calls == 1u);
+    assert(test_auto_calls == 0u);
+    step(2u);
+    assert(test_auto_calls == 1u && test_output_enabled && !app_runtime_has_fault());
+
+    test_clear_event = test_clear_active = true;
+    step(2u);
+    test_clear_active = false;
+    for(unsigned i = 0; i < 3u; ++i) side_laser_frame(39u, 35u);
+    assert(app_runtime_get_state() == APP_FSM_STATE_IDLE && !test_output_enabled);
+
+    test_remote.channel[REMOTE_CH_SWD] = REMOTE_CENTER;
+    step(2u);
+    start_radio_auto();
+    assert(app_runtime_get_state() == APP_FSM_STATE_AUTO && test_zero_calls == 2u);
+}
+
+static void test_side_laser_start_requires_online_radio(void) {
+    reset_fixture();
+    all_ready();
+    test_remote.channel[REMOTE_CH_SWD] = REMOTE_SW_LOW;
+    test_online = false;
+    for(unsigned i = 0; i < 3u; ++i) side_laser_frame(39u, 35u);
+    assert(app_runtime_get_state() == APP_FSM_STATE_IDLE && test_enable_calls == 0u);
+
+    test_online = true;
+    step(2u);
+    side_laser_frame(39u, 35u);
+    side_laser_frame(39u, 35u);
+    test_online = false;
+    step(2u);
+    test_online = true;
+    step(2u);
+    side_laser_frame(39u, 35u);
+    side_laser_frame(39u, 35u);
+    assert(app_runtime_get_state() == APP_FSM_STATE_IDLE && test_enable_calls == 0u);
+    side_laser_frame(39u, 35u);
+    assert(app_runtime_get_state() == APP_FSM_STATE_AUTO && test_zero_calls == 1u);
 }
 
 static void test_level_selection_wait_and_prepare(void) {
@@ -206,8 +293,7 @@ static void test_offline_and_existing_auto_flow(void) {
 
     reset_fixture();
     all_ready();
-    test_remote.channel[REMOTE_CH_SWD] = REMOTE_SW_LOW;
-    step(2u);
+    start_radio_auto();
     assert(app_runtime_get_state() == APP_FSM_STATE_AUTO && test_output_enabled);
     assert(test_zero_calls == 1u && test_auto_calls == 0u);
     step(2u);
@@ -219,6 +305,16 @@ static void test_offline_and_existing_auto_flow(void) {
     assert(test_output_enabled && test_manual_calls == 0u);
     step(2u);
     assert(test_manual_calls == 1u);
+
+    test_remote.channel[REMOTE_CH_SWD] = REMOTE_SW_LOW;
+    step(2u);
+    assert(app_runtime_get_state() == APP_FSM_STATE_IDLE && !test_output_enabled);
+    step(2u);
+    side_laser_frame(39u, 35u);
+    side_laser_frame(39u, 35u);
+    assert(app_runtime_get_state() == APP_FSM_STATE_IDLE && !test_output_enabled);
+    side_laser_frame(39u, 35u);
+    assert(app_runtime_get_state() == APP_FSM_STATE_AUTO && test_output_enabled);
 }
 
 static void key_level(bool pressed, uint32_t duration_ms) {
@@ -306,8 +402,7 @@ static void test_key_ownership_and_auto_odom_error(void) {
 static void test_auto_errors_do_not_fault_or_insert_zero(void) {
     reset_fixture();
     all_ready();
-    test_remote.channel[REMOTE_CH_SWD] = REMOTE_SW_LOW;
-    step(2u);
+    start_radio_auto();
     step(2u);
     assert(app_runtime_get_state() == APP_FSM_STATE_AUTO && test_auto_calls == 1u);
     const unsigned zero_calls = test_zero_calls;
@@ -339,8 +434,7 @@ static void test_auto_errors_do_not_fault_or_insert_zero(void) {
 
     reset_fixture();
     all_ready();
-    test_remote.channel[REMOTE_CH_SWD] = REMOTE_SW_LOW;
-    step(2u);
+    start_radio_auto();
     step(2u);
     test_auto_result = APP_CONTROL_RESULT_CHASSIS_ERROR;
     step(2u);
@@ -350,8 +444,7 @@ static void test_auto_errors_do_not_fault_or_insert_zero(void) {
 static void test_pump_mode(void) {
     reset_fixture();
     all_ready();
-    test_remote.channel[REMOTE_CH_SWD] = REMOTE_SW_LOW;
-    step(2u);
+    start_radio_auto();
     step(2u);
     assert(test_output_enabled && test_auto_calls == 1u && !test_pump_enabled);
 
@@ -395,6 +488,8 @@ static void test_pump_mode(void) {
     test_remote.channel[REMOTE_CH_SWA] = REMOTE_SW_HIGH;
     step(2u);
     assert(!test_pump_enabled && test_pump_relays == 0u);
+    assert(app_runtime_get_state() == APP_FSM_STATE_IDLE && !test_output_enabled);
+    for(unsigned i = 0; i < 3u; ++i) side_laser_frame(39u, 35u);
     assert(app_runtime_get_state() == APP_FSM_STATE_AUTO && test_output_enabled);
 
     test_remote.channel[REMOTE_CH_SWA] = REMOTE_SW_LOW;
@@ -405,6 +500,8 @@ static void test_pump_mode(void) {
 }
 
 int main(void) {
+    test_side_lasers_start_radio_auto();
+    test_side_laser_start_requires_online_radio();
     test_local_start_and_stop();
     test_radio_overrides_local_auto();
     test_key_ownership_and_auto_odom_error();
@@ -414,6 +511,6 @@ int main(void) {
     test_offline_and_existing_auto_flow();
     test_auto_errors_do_not_fault_or_insert_zero();
     test_pump_mode();
-    puts("PASS runtime: local key, ownership, EStop, RC safety, Manual faults, Auto override and pump mode");
+    puts("PASS runtime: radio Auto laser start, local key, EStop, RC safety, Manual faults, Auto override and pump mode");
     return 0;
 }

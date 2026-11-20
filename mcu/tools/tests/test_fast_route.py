@@ -36,6 +36,7 @@ class Leg:
     rear_escape: bool
     work_stop: bool
     endpoint_side_trim: bool
+    wheel_extra_m: float = 0.0
 
 
 def parse_route() -> list[Leg]:
@@ -52,16 +53,16 @@ def parse_route() -> list[Leg]:
     for raw_line in ROUTE_SOURCE.splitlines():
         line = raw_line.strip()
         cross = re.match(
-            r"CROSS\((WEST|EAST),\s*(\d+),\s*(true|false),\s*(true|false),\s*(true|false)\)",
+            r"CROSS\((WEST|EAST),\s*(\d+),\s*(true|false),\s*(true|false),\s*(true|false),\s*(\d+\.\d+)f\)",
             line,
         )
         connect = re.match(r"CONNECT\((WEST|EAST),\s*(\d+),\s*(LASER_\w+)\)", line)
         if cross:
-            x_name, row, rear_escape, work_stop, endpoint_trim = cross.groups()
+            x_name, row, rear_escape, work_stop, endpoint_trim, wheel_extra = cross.groups()
             legs.append(Leg(west if x_name == "WEST" else east,
                             0.2 + 0.7 * (int(row) - 1), speeds["ROUTE_CROSS_SPEED_MPS"],
                             "LASER_FRONT", True, rear_escape == "true", work_stop == "true",
-                            endpoint_trim == "true"))
+                            endpoint_trim == "true", float(wheel_extra)))
         elif connect:
             x_name, row, side = connect.groups()
             legs.append(Leg(west if x_name == "WEST" else east,
@@ -98,7 +99,7 @@ def check_route(legs: list[Leg]) -> float:
     ]
     gated = {2, 3, 5, 7, 9, 11, 13, 15}
     rear_protected = {5, 7, 9, 11, 13, 15}
-    working_passes = {2, 5, 7, 9, 11, 13, 15}
+    working_passes = {2, 5, 7, 9, 11, 13}
     previous = (0.2, -0.5)
     total = 0.0
     for number, (leg, target) in enumerate(zip(legs, expected), 1):
@@ -114,10 +115,14 @@ def check_route(legs: list[Leg]) -> float:
         dx = 0.0 if abs(dx) < 1e-6 else dx
         dy = 0.0 if abs(dy) < 1e-6 else dy
         assert (dx != 0.0) ^ (dy != 0.0), f"leg {number} is not axis-aligned"
-        total += abs(dx) + abs(dy)
+        wheel_distance = abs(dx) + abs(dy) + leg.wheel_extra_m
+        assert math.isclose(leg.wheel_extra_m, 0.1 if number == 9 else 0.0), f"leg {number} wheel extension"
+        if number in (9, 10, 11):
+            assert math.isclose(wheel_distance, {9: 2.7, 10: 0.7, 11: 2.6}[number]), f"leg {number} wheel distance"
+        total += wheel_distance
         previous = (leg.x, leg.y)
     assert previous == (0.2, -0.5)
-    assert math.isclose(total, 30.6)
+    assert math.isclose(total, 30.7)
     assert legs[1].y == legs[2].y and legs[1].work_stop and not legs[2].work_stop
     assert legs[4].x == legs[5].x and legs[5].control == "LASER_RIGHT"
     connectors = [4, 6, 8, 10, 12, 14]
@@ -264,7 +269,9 @@ def check_control_contract() -> None:
         "ROUTE01_FINAL_APPROACH_MPS", "ROUTE01_FRONT_ENDPOINT_MM",
     ):
         assert forbidden not in CONTROL_SOURCE, f"obsolete endpoint logic remains: {forbidden}"
+    assert "fabsf(delta) + leg->wheel_extra_m" in CONTROL_SOURCE
     assert "route_braking_speed(remaining)" in CONTROL_SOURCE
+    assert numeric_define(CONTROL_SOURCE, "ROUTE_WORK_PUMP_MS") == 1000
     assert re.search(r"remaining\s*<=\s*ROUTE_END_TOLERANCE_M", CONTROL_SOURCE)
 
     # The launch measurement L=42 needs leftward correction until field entry.
@@ -361,7 +368,7 @@ def main() -> None:
     previous = (0.2, -0.5)
     motion_time = 0.0
     for leg in legs:
-        leg_distance = math.hypot(leg.x - previous[0], leg.y - previous[1])
+        leg_distance = math.hypot(leg.x - previous[0], leg.y - previous[1]) + leg.wheel_extra_m
         motion_time += ideal_leg_time(leg_distance, leg.speed)
         previous = (leg.x, leg.y)
     print(f"PASS: 16 legs, route {distance:.3f} m; wheel distance owns route progress")
@@ -369,9 +376,10 @@ def main() -> None:
     print("PASS: width-adaptive dual travel guidance uses +/-1 mm deadband; gain=1.0, limit=0.06 m/s")
     print("PASS: LEFT launch=36 mm, field=41 mm, RIGHT=45 mm; side deadband +/-1 mm")
     print("PASS: filtered walls bound speed and can accept an endpoint in the last 80 mm")
-    print("PASS: 03/05/07/09/11/13/15 require side-wall alignment before connectors or exit")
+    print("PASS: 03/05/07/09/11/13 require side-wall alignment; 09 wheel target is 2.70 m")
     print("PASS: 04/06/08/10/12/14 use wheel X + side Y; side hold/resume uses 35/38 mm")
     print("PASS: 02 works in furrow 1 and 03 returns through it without repeating work")
+    print("PASS: 15 has no work stop and requires west wall alignment before 16")
     print("PASS: raw 0..5000 mm; FRONT escape=55 mm; LEFT/RIGHT escape=30 mm")
     print("PASS: rear 30 mm escape only on 05/07/09/11/13/15; 02/03 rear escape disabled")
     print(f"PASS: 16 wheel-odometry trapezoids, ideal motion {motion_time:.2f} s plus settling")

@@ -47,7 +47,7 @@ def read_route():
             command = "+vy" if dx > 0 else "-vy"
         else:
             command = "-vx" if dy > 0 else "+vx"
-        distance = math.hypot(dx, dy)
+        distance = math.hypot(dx, dy) + leg.wheel_extra_m
         segments.append((number, previous, end, distance, command))
         if dx:
             furrows.setdefault(leg.y, []).append((number, distance, leg.work_stop))
@@ -138,7 +138,9 @@ def draw_logic(panel, segments, furrows, trim_segments):
     panel.axis("off")
     panel.set(xlim=(0, 1), ylim=(0, 1), autoscale_on=False)
     panel.text(0.01, 0.99, "垄号按首次进入顺序", fontsize=15, fontweight="bold", color=INK, va="top")
-    headers = ((0.025, "垄号"), (0.17, "Y / m"), (0.30, "经过段 · 累计距离"), (0.65, "停车作业"))
+    pump_s = numeric_define(CONTROL_SOURCE, "ROUTE_WORK_PUMP_MS") / 1000
+    headers = ((0.025, "垄号"), (0.17, "Y / m"), (0.30, "经过段 · 累计距离"),
+               (0.65, f"停车作业 · 开泵 {pump_s:g} s"))
     for x, title in headers:
         panel.text(x, 0.925, title, fontsize=9.7, fontweight="bold", color=MUTED, va="center")
     panel.axhline(0.902, color="#B6C2CD", lw=1)
@@ -149,7 +151,7 @@ def draw_logic(panel, segments, furrows, trim_segments):
             panel.axhspan(y - 0.019, y + 0.019, color="#EDF3F7", zorder=0)
         numbers = "/".join(f"{number:02d}" for number, _, _ in passes)
         distance = sum(distance for _, distance, _ in passes)
-        work = "，".join(f"{number:02d} 作业" if enabled else f"{number:02d} 仅返回"
+        work = "，".join(f"{number:02d} 作业" if enabled else f"{number:02d} 通行"
                         for number, _, enabled in passes)
         for x, value in ((0.025, f"第 {index} 垄"), (0.17, f"{y_m:.2f}"),
                          (0.30, f"{numbers} · {distance:.2f} m"), (0.65, work)):
@@ -158,8 +160,8 @@ def draw_logic(panel, segments, furrows, trim_segments):
     panel.text(0.01, 0.535, "逐段控制", fontsize=15, fontweight="bold", color=INK, va="center")
     blocks = (
         (0.485, "01　入场 · 4.90 m", "轮速推进｜CAN LEFT 中值纠偏 36 → 41 mm｜前束留 70 mm"),
-        (0.422, "02／03／05／07／09／11／13／15　横穿 · 各 2.60 m",
-         "轮速推进｜前后束中值纠偏｜行进方向侧束限速"),
+        (0.422, "横穿 · 09 为 2.70 m，其余各 2.60 m",
+         "轮速推进｜前后束纠偏｜侧束限速"),
         (0.329, "04／08／12　西侧换垄 · 各 0.70 m",
          "轮速推进｜CAN LEFT（车体右）41 mm｜贴壁先让开"),
         (0.265, "06／10／14　东侧换垄 · 各 0.70 m",
@@ -190,7 +192,7 @@ def draw_logic(panel, segments, furrows, trim_segments):
                fontsize=8.7, color="#285677", va="center")
     panel.text(0.025, 0.042, "01～15 激光数据过期时暂停推进，16 按轮速退出",
                fontsize=8.7, color="#285677", va="center")
-    panel.text(0.965, 0.111, f"标称 {total:.2f} m", fontsize=12.5, fontweight="bold",
+    panel.text(0.965, 0.111, f"轮速目标 {total:.2f} m", fontsize=12.5, fontweight="bold",
                color="#175E9E", ha="right", va="center")
 
 
@@ -205,7 +207,7 @@ def main():
     fig.suptitle("全局跑图示意", x=0.055, y=0.955, ha="left", fontsize=25,
                  fontweight="bold", color=INK)
     fig.text(0.055, 0.900, "16 段 · 7 条垄 · 8 次横穿 · 6 次换垄", fontsize=11.5, color=MUTED)
-    fig.text(0.055, 0.044, "段长由 map_route.c 的相邻目标点计算。重合箭头略微错开，垄背为位置示意。",
+    fig.text(0.055, 0.044, "标签显示轮速段长，09 在同一东墙交接点的基础上增加 0.10 m。垄背为位置示意。",
              fontsize=9.4, color=MUTED)
     fig.savefig(OUTPUT, facecolor=fig.get_facecolor())
     plt.close(fig)

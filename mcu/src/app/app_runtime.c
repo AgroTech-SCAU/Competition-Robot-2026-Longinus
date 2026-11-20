@@ -18,12 +18,21 @@
 #define APP_RUNTIME_STARTUP_TIMEOUT_MS 3000u
 #define APP_RUNTIME_STOP_RETRY_MS 100u
 #define APP_RUNTIME_KEY_DEBOUNCE_MS 30u
+#define APP_RUNTIME_LASER_START_MIN_MM 30u
+#define APP_RUNTIME_LASER_START_MAX_MM 85u
+#define APP_RUNTIME_LASER_START_FRAMES 3u
+#define APP_RUNTIME_LASER_START_MAX_AGE_MS 120u
 
 /* A locally started race owns the controls only while the radio is offline. */
 static bool s_local_race;
 static bool s_key_candidate_pressed;
 static bool s_key_armed;
 static ms_t s_key_changed_ms;
+static bool s_laser_start_waiting;
+static bool s_laser_start_consumed;
+static uint8_t s_laser_start_count;
+static uint32_t s_laser_start_frame;
+static ms_t s_laser_start_stamp_ms;
 static bool s_waiting_ready = false;
 static bool s_motor_starting = false;
 static ms_t s_motor_start_since_ms = 0u;
@@ -50,6 +59,11 @@ void app_runtime_init(void) {
     s_key_candidate_pressed = true;
     s_key_armed = false; /* Observe a stable release before the first press. */
     s_key_changed_ms = delay_now_ms();
+    s_laser_start_waiting = false;
+    s_laser_start_consumed = false;
+    s_laser_start_count = 0u;
+    s_laser_start_frame = 0u;
+    s_laser_start_stamp_ms = 0u;
     s_waiting_ready = false;
     s_motor_starting = false;
     s_motor_start_since_ms = 0u;
@@ -92,8 +106,40 @@ static bool app_runtime_key_press(bool pressed, ms_t now) {
     return true;
 }
 
+static bool app_runtime_laser_start_ready(bool waiting, ms_t now) {
+    const LaserOdomSample* sample = laser_odom_get_sample();
+    const unsigned side_mask = (1u << LASER_LEFT) | (1u << LASER_RIGHT);
+    const uint16_t left = sample->distance_mm[LASER_LEFT];
+    const uint16_t right = sample->distance_mm[LASER_RIGHT];
+
+    /* Only count frames received after the Auto switch arms an idle vehicle. */
+    if(!waiting || !s_laser_start_waiting) {
+        s_laser_start_waiting = waiting;
+        s_laser_start_frame = sample->received;
+        s_laser_start_count = 0u;
+        return false;
+    }
+    if(sample->received == 0u || (ms_t)(now - sample->stamp_ms) > APP_RUNTIME_LASER_START_MAX_AGE_MS ||
+       (sample->valid_mask & side_mask) != side_mask ||
+       left < APP_RUNTIME_LASER_START_MIN_MM || left > APP_RUNTIME_LASER_START_MAX_MM ||
+       right < APP_RUNTIME_LASER_START_MIN_MM || right > APP_RUNTIME_LASER_START_MAX_MM) {
+        s_laser_start_count = 0u;
+        return false;
+    }
+    if(sample->received != s_laser_start_frame) {
+        if((ms_t)(sample->stamp_ms - s_laser_start_stamp_ms) > APP_RUNTIME_LASER_START_MAX_AGE_MS) {
+            s_laser_start_count = 0u;
+        }
+        s_laser_start_frame = sample->received;
+        s_laser_start_stamp_ms = sample->stamp_ms;
+        if(s_laser_start_count < APP_RUNTIME_LASER_START_FRAMES) ++s_laser_start_count;
+    }
+    return s_laser_start_count >= APP_RUNTIME_LASER_START_FRAMES;
+}
+
 void app_runtime_process(bool local_key_pressed) {
-    const bool key_event = app_runtime_key_press(local_key_pressed, delay_now_ms());
+    const ms_t now = delay_now_ms();
+    const bool key_event = app_runtime_key_press(local_key_pressed, now);
     const bool online = remote_is_online(100u);
     const FsIa10bData* radio = online ? remote_get_raw_data() : NULL;
     const bool pump_requested = radio != NULL && radio->channel[REMOTE_CH_SWA] == REMOTE_SW_LOW;
@@ -103,6 +149,11 @@ void app_runtime_process(bool local_key_pressed) {
     const bool clear_reset_active = online && remote_is_clear_reset_active();
     const bool manual_request = remote_is_manual_requested();
     const bool auto_request = remote_is_auto_requested();
+    if(!online || !auto_request) s_laser_start_consumed = false;
+    const bool waiting_for_laser = online && auto_request && !pump_requested && !clear_reset_event &&
+                                   !clear_reset_active && !s_laser_start_consumed &&
+                                   app_fsm_get_state() == APP_FSM_STATE_IDLE;
+    const bool laser_start = app_runtime_laser_start_ready(waiting_for_laser, now);
     AppControlResult control_result;
     ChassisErrorCode status;
 
@@ -172,19 +223,17 @@ void app_runtime_process(bool local_key_pressed) {
         return;
     }
     else if(auto_request) {
-        bool stopped_for_switch = false;
         if(app_fsm_get_state() == APP_FSM_STATE_MANUAL) {
             app_runtime_stop(false);
             if(s_stop_retry_pending) return;
-            stopped_for_switch = true;
+            (void)app_fsm_post(APP_FSM_EVENT_STOP);
+            app_fsm_process();
+            return;
         }
-        if(app_fsm_get_state() == APP_FSM_STATE_IDLE || app_fsm_get_state() == APP_FSM_STATE_MANUAL) {
+        if(laser_start && app_fsm_post(APP_FSM_EVENT_SWITCH_TO_AUTO)) {
+            s_laser_start_consumed = true;
             s_waiting_ready = true;
-            (void)app_fsm_post(APP_FSM_EVENT_SWITCH_TO_AUTO);
-            if(stopped_for_switch) {
-                app_fsm_process();
-                return;
-            }
+            log_info("AUTO radio laser start");
         }
     }
     else if(!manual_request) {

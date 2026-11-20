@@ -20,6 +20,7 @@
 #define ROUTE_PROFILE_START_SPEED_MPS 0.02f
 #define ROUTE_END_TOLERANCE_M 0.005f
 #define ROUTE_WALL_END_WINDOW_M 0.08f
+#define ROUTE_WALL_RECOVERY_WINDOW_M 0.25f
 #define ROUTE_WALL_TRIM_MAX_M 0.15f
 #define ROUTE_WALL_TRIM_MAX_MS 5500u
 #define ROUTE_WALL_TRIM_SPEED_MPS 0.04f
@@ -28,6 +29,7 @@
 #define LASER_WALL_TRIM_TOLERANCE_MM 1.0f
 #define LASER_WALL_TRIM_CONFIRM_FRAMES 3u
 #define LASER_WALL_ACCEPT_MARGIN_MM 3.0f
+#define LASER_WALL_BRAKE_START_MM 400.0f
 #define LASER_WALL_BRAKE_MPS2 0.35f
 #define LASER_FRONT_WALL_RESERVE_MM 70.0f
 #define LASER_LEFT_WALL_RESERVE_MM 48.0f
@@ -40,6 +42,7 @@
 #define LASER_RIGHT_TARGET_MM 45.0f
 #define LASER_DUAL_TOLERANCE_MM 1.0f
 #define LASER_START_ACQUIRE_MM 105.0f
+#define LASER_SIDE_GUIDANCE_MAX_MM 120.0f
 #define LASER_CONTROL_DEADBAND_MM 1.0f
 #define LASER_FURROW_SUM_MIN_MM 95.0f
 #define LASER_FURROW_SUM_MAX_MM 125.0f
@@ -58,8 +61,12 @@
 #define LASER_SAFETY_MM 30.0f
 #define LASER_ESCAPE_GAIN 2.5f
 #define LASER_ESCAPE_LIMIT_MPS 0.09f
+#define LASER_SIDE_ESCAPE_MIN_MPS 0.015f
 #define ROUTE_COMMAND_LIMIT_MPS 0.65f
 #define ROUTE_ALIGN_LOG_PERIOD_MS 250u
+#define ROUTE_ENTRY_PUMP_PRIME_MS 1000u
+#define ROUTE_ENTRY_PA0_MS 2000u
+#define ROUTE_ENTRY_PUMP_MS (ROUTE_ENTRY_PUMP_PRIME_MS + ROUTE_ENTRY_PA0_MS)
 
 /* UART9 work laser. Leave both ends of a crossing clear of work stops. */
 #define ROUTE_WORK_TRIGGER_MM 350u
@@ -67,7 +74,7 @@
 #define ROUTE_WORK_REARM_MS 150u
 #define ROUTE_WORK_END_MARGIN_M 0.40f
 #define ROUTE_WORK_RANGE_MAX_AGE_MS 200u
-#define ROUTE_WORK_PUMP_MS 2000u
+#define ROUTE_WORK_PUMP_MS 1000u
 
 typedef enum {
     ROUTE_START_LEG = 0,
@@ -78,6 +85,12 @@ typedef enum {
     ROUTE_PARKED,
     ROUTE_WALL_TRIM
 } RoutePhase;
+
+typedef enum {
+    ENTRY_PUMP_PENDING = 0,
+    ENTRY_PUMP_ACTIVE,
+    ENTRY_PUMP_DONE
+} RouteEntryPumpState;
 
 typedef enum {
     ROUTE_SPEED_STOP = 0,
@@ -97,6 +110,7 @@ typedef struct {
     size_t segment_index;
     RoutePhase phase;
     RouteSpeedPhase speed_phase;
+    RouteEntryPumpState entry_pump_state;
     float remaining_m;
     float route_speed_mps;
     float correction_mps;
@@ -111,6 +125,7 @@ typedef struct {
     float imu_heading_ref;
     uint32_t travel_ms;
     uint32_t settle_ready_since_ms;
+    uint32_t entry_pump_since_ms;
     uint32_t wall_trim_started_ms;
     uint32_t wall_trim_confirm_frame;
     uint32_t last_control_ms;
@@ -123,6 +138,8 @@ typedef struct {
     bool connector_hold;
     bool wall_trim_started;
     bool wall_trim_motion_exhausted;
+    bool wall_trim_recovery_pending;
+    bool wall_trim_recovery_used;
     unsigned int wall_trim_confirm_count;
     bool yaw_target_valid;
     bool work_target_latched;
@@ -165,6 +182,19 @@ void app_odom_test_set_work_range(bool frame_received, uint16_t distance_mm, uin
 
 bool app_odom_test_work_pump_enabled(void) {
     return s_odom_test.phase == ROUTE_WORK_PUMPING;
+}
+
+bool app_odom_test_entry_pump_enabled(void) {
+    if(s_odom_test.entry_pump_state == ENTRY_PUMP_ACTIVE &&
+       delay_now_ms() - s_odom_test.entry_pump_since_ms >= ROUTE_ENTRY_PUMP_MS) {
+        s_odom_test.entry_pump_state = ENTRY_PUMP_DONE;
+    }
+    return s_odom_test.entry_pump_state == ENTRY_PUMP_ACTIVE;
+}
+
+bool app_odom_test_entry_pa0_enabled(void) {
+    return app_odom_test_entry_pump_enabled() &&
+           delay_now_ms() - s_odom_test.entry_pump_since_ms >= ROUTE_ENTRY_PUMP_PRIME_MS;
 }
 
 static bool route_work_active(void) {
@@ -230,6 +260,10 @@ static void route_wall_trim_reset_confirmation(uint32_t frame) {
 }
 
 static AppControlResult route_odom_error(void) {
+    if(app_odom_test_entry_pump_enabled()) {
+        s_odom_test.entry_pump_state = ENTRY_PUMP_PENDING;
+        s_odom_test.settle_ready_since_ms = 0u;
+    }
     const bool wall_trim = s_odom_test.phase == ROUTE_WALL_TRIM;
     if(route_work_active() || wall_trim) {
         if(wall_trim) {
@@ -379,7 +413,7 @@ static float route_lateral_target(const MapRouteLeg* leg, const LaserOdomSample*
     }
     else {
         if(!route_laser_valid(sample, beam, now) ||
-           sample->distance_mm[beam] > LASER_START_ACQUIRE_MM) return 0.0f;
+           sample->distance_mm[beam] > LASER_SIDE_GUIDANCE_MAX_MM) return 0.0f;
         const float target_mm = launch_zone ? LASER_LAUNCH_LEFT_TARGET_MM :
                                               route_side_target_mm(beam);
         const float error_mm = route_target_error_mm(sample->distance_mm[beam], target_mm);
@@ -418,9 +452,10 @@ static float route_braking_speed(float remaining_m) {
     return sqrtf(2.0f * s_odom_test.decel_mps2 * fmaxf(0.0f, remaining_m));
 }
 
-static float route_wall_speed_limit(uint16_t wall_mm, float reserve_mm) {
-    const float usable_m = fmaxf(0.0f, ((float)wall_mm - reserve_mm) * 0.001f);
-    return sqrtf(2.0f * LASER_WALL_BRAKE_MPS2 * usable_m);
+static float route_wall_speed_limit(uint16_t wall_mm, float reserve_mm, float cruise_mps) {
+    /* Constant-deceleration speed cap from 400 mm down to the retained gap. */
+    const float fraction = ((float)wall_mm - reserve_mm) / (LASER_WALL_BRAKE_START_MM - reserve_mm);
+    return cruise_mps * sqrtf(fminf(1.0f, fmaxf(0.0f, fraction)));
 }
 
 static float route_update_speed(float target_mps, float dt_s) {
@@ -482,11 +517,13 @@ static RouteEscape route_safety_escape(const MapRouteLeg* leg, const LaserOdomSa
     }
     if(left != right) {
         if(left) {
-            escape.vy += route_escape_speed(sample->distance_mm[LASER_LEFT], LASER_SAFETY_MM);
+            escape.vy += fmaxf(LASER_SIDE_ESCAPE_MIN_MPS,
+                               route_escape_speed(sample->distance_mm[LASER_LEFT], LASER_SAFETY_MM));
             escape.mask |= 1u << LASER_LEFT;
         }
         else {
-            escape.vy -= route_escape_speed(sample->distance_mm[LASER_RIGHT], LASER_SAFETY_MM);
+            escape.vy -= fmaxf(LASER_SIDE_ESCAPE_MIN_MPS,
+                               route_escape_speed(sample->distance_mm[LASER_RIGHT], LASER_SAFETY_MM));
             escape.mask |= 1u << LASER_RIGHT;
         }
     }
@@ -611,6 +648,15 @@ static AppControlResult route_settle(const MapRouteLeg* leg, const LaserOdomSamp
     if(command != APP_CONTROL_RESULT_OK) return command;
 
     const bool safety_ready = leg->control_beam == LASER_NO_BEAM || route_frame_fresh(sample, now);
+    if(s_odom_test.entry_pump_state == ENTRY_PUMP_ACTIVE) {
+        const bool pump_running = app_odom_test_entry_pump_enabled();
+        if(safety_active || !safety_ready) {
+            s_odom_test.settle_ready_since_ms = 0u;
+            if(pump_running) s_odom_test.entry_pump_state = ENTRY_PUMP_PENDING;
+        }
+        /* Apply the output change before the next control tick can advance. */
+        return command;
+    }
     if(!route_is_stationary(velocity) || safety_active || !safety_ready) {
         s_odom_test.settle_ready_since_ms = 0u;
         return command;
@@ -618,12 +664,21 @@ static AppControlResult route_settle(const MapRouteLeg* leg, const LaserOdomSamp
     if(s_odom_test.settle_ready_since_ms == 0u) s_odom_test.settle_ready_since_ms = now;
     if(now - s_odom_test.settle_ready_since_ms < APP_ODOM_TEST_SETTLE_READY_MS) return command;
 
+    if(s_odom_test.segment_index == 0u && s_odom_test.entry_pump_state == ENTRY_PUMP_PENDING) {
+        log_info("MAP ENTRY PUMP seg=1 prime=%u ms PA0=%u ms",
+                 (unsigned int)ROUTE_ENTRY_PUMP_PRIME_MS, (unsigned int)ROUTE_ENTRY_PA0_MS);
+        s_odom_test.entry_pump_since_ms = delay_now_ms();
+        s_odom_test.entry_pump_state = ENTRY_PUMP_ACTIVE;
+        return command;
+    }
     if(!leg->endpoint_side_trim) return route_next_or_park(now);
 
     /* A stop at the endpoint starts the side-wall alignment. */
     s_odom_test.wall_trim_start_m = progress_m;
     s_odom_test.wall_trim_started = false;
     s_odom_test.wall_trim_motion_exhausted = false;
+    s_odom_test.wall_trim_recovery_pending = false;
+    s_odom_test.wall_trim_recovery_used = false;
     route_wall_trim_reset_confirmation(sample->received);
     s_odom_test.travel_ms = now;
     s_odom_test.phase = ROUTE_WALL_TRIM;
@@ -659,6 +714,26 @@ static AppControlResult route_wall_trim(const MapRouteLeg* leg, const LaserOdomS
                              wall_mm <= LASER_WALL_TRIM_CAPTURE_MM;
     const float error_mm = (float)wall_mm - target_mm;
     const bool in_band = range_valid && fabsf(error_mm) <= LASER_WALL_TRIM_TOLERANCE_MM;
+    bool safety_active = route_safety_escape(leg, sample, now, 0.0f, 0.0f).mask != 0u;
+    const uint16_t raw_mm = sample->distance_mm[wall];
+    const float raw_error_mm = (float)raw_mm - target_mm;
+    const bool can_correct = range_valid && !in_band && !safety_active &&
+                             route_laser_valid(sample, wall, now) && raw_error_mm * error_mm > 0.0f &&
+                             fabsf(raw_error_mm) > LASER_WALL_TRIM_TOLERANCE_MM;
+    if(safety_active && !s_odom_test.wall_trim_recovery_used) {
+        s_odom_test.wall_trim_recovery_pending = true;
+    }
+    else if(!safety_active && s_odom_test.wall_trim_recovery_pending && range_valid &&
+            wall_mm >= LASER_SAFETY_MM) {
+        /* Give one new bounded attempt after the safety escape has cleared. */
+        s_odom_test.wall_trim_recovery_pending = false;
+        s_odom_test.wall_trim_recovery_used = true;
+        s_odom_test.wall_trim_start_m = progress_m;
+        s_odom_test.wall_trim_started = false;
+        s_odom_test.wall_trim_motion_exhausted = false;
+        route_wall_trim_reset_confirmation(sample->received);
+        log_info("MAP WALL ALIGN RESUME seg=%u beam=%u", s_odom_test.laser.segment, (unsigned int)wall);
+    }
     const float extra_m = progress_m - s_odom_test.wall_trim_start_m;
     const float wheel_budget_m = ROUTE_WALL_TRIM_MAX_M - fabsf(extra_m);
     const bool distance_limit = wheel_budget_m <= ROUTE_END_TOLERANCE_M;
@@ -666,27 +741,23 @@ static AppControlResult route_wall_trim(const MapRouteLeg* leg, const LaserOdomS
                             now - s_odom_test.wall_trim_started_ms >= ROUTE_WALL_TRIM_MAX_MS;
     if(!s_odom_test.wall_trim_motion_exhausted && (distance_limit || time_limit)) {
         s_odom_test.wall_trim_motion_exhausted = true;
-        log_info("MAP WALL ALIGN LIMIT seg=%u reason=%s extra=%.3f", s_odom_test.laser.segment,
-                 distance_limit ? "distance" : "time", (double)extra_m);
+        log_info("MAP WALL ALIGN LIMIT seg=%u reason=%s extra=%.3f raw=%u filtered=%u",
+                 s_odom_test.laser.segment, distance_limit ? "distance" : "time", (double)extra_m,
+                 (unsigned int)raw_mm, (unsigned int)wall_mm);
     }
 
-    bool safety_active = route_safety_escape(leg, sample, now, 0.0f, 0.0f).mask != 0u;
     float target = 0.0f;
-    if(range_valid && !in_band && !safety_active && !s_odom_test.wall_trim_motion_exhausted) {
+    if(can_correct && !s_odom_test.wall_trim_motion_exhausted) {
         /* A raw sample may stop a correction at the edge of the band, while
          * only the filtered range can choose its direction or confirm arrival. */
-        const float raw_error_mm = (float)sample->distance_mm[wall] - target_mm;
-        if(raw_error_mm * error_mm > 0.0f &&
-           fabsf(raw_error_mm) > LASER_WALL_TRIM_TOLERANCE_MM) {
-            const float budget_speed = sqrtf(2.0f * LASER_WALL_BRAKE_MPS2 * wheel_budget_m);
-            const float speed = fmaxf(ROUTE_WALL_TRIM_CRAWL_MPS,
-                                     LASER_SIDE_CONTROL_GAIN * fabsf(error_mm) * 0.001f);
-            const float direction = wall == LASER_LEFT ? -error_mm : error_mm;
-            target = copysignf(fminf(speed, fminf(ROUTE_WALL_TRIM_SPEED_MPS, budget_speed)), direction);
-            if(!s_odom_test.wall_trim_started) {
-                s_odom_test.wall_trim_started = true;
-                s_odom_test.wall_trim_started_ms = now;
-            }
+        const float budget_speed = sqrtf(2.0f * LASER_WALL_BRAKE_MPS2 * wheel_budget_m);
+        const float speed = fmaxf(ROUTE_WALL_TRIM_CRAWL_MPS,
+                                 LASER_SIDE_CONTROL_GAIN * fabsf(error_mm) * 0.001f);
+        const float direction = wall == LASER_LEFT ? -error_mm : error_mm;
+        target = copysignf(fminf(speed, fminf(ROUTE_WALL_TRIM_SPEED_MPS, budget_speed)), direction);
+        if(!s_odom_test.wall_trim_started) {
+            s_odom_test.wall_trim_started = true;
+            s_odom_test.wall_trim_started_ms = now;
         }
     }
 
@@ -751,7 +822,7 @@ AppControlResult app_odom_test_process(void) {
     const float from_y = index ? map_route[index - 1u].y_m : MAP_START_Y_M;
     const bool test_vy = leg->x_m != from_x;
     const float delta = test_vy ? leg->x_m - from_x : leg->y_m - from_y;
-    const float distance_m = fabsf(delta);
+    const float distance_m = fabsf(delta) + leg->wheel_extra_m;
     const float sign = copysignf(1.0f, delta);
     const LaserOdomSample* sample = laser_odom_get_sample();
 
@@ -808,9 +879,19 @@ AppControlResult app_odom_test_process(void) {
     const float wall_reserve = end_wall == LASER_FRONT ? LASER_FRONT_WALL_RESERVE_MM :
         (end_wall == LASER_LEFT ? LASER_LEFT_WALL_RESERVE_MM : LASER_RIGHT_WALL_RESERVE_MM);
     const bool wall_valid = route_laser_valid(&filtered, end_wall, now);
-    const bool wall_arrival = wall_valid && remaining <= ROUTE_WALL_END_WINDOW_M &&
-        (float)filtered.distance_mm[end_wall] <= wall_reserve + LASER_WALL_ACCEPT_MARGIN_MM;
-    if(remaining <= ROUTE_END_TOLERANCE_M || wall_arrival) {
+    const float wall_accept_mm = wall_reserve + LASER_WALL_ACCEPT_MARGIN_MM;
+    const bool near_wall = wall_valid && (float)filtered.distance_mm[end_wall] <= wall_accept_mm;
+    /* If wheel odometry is short, confirm a stopped crossing at its expected
+     * side wall before accepting the bounded recovery window. */
+    const bool recovery_wall = test_vy && near_wall && remaining > ROUTE_WALL_END_WINDOW_M &&
+        remaining <= ROUTE_WALL_RECOVERY_WINDOW_M && filtered.distance_mm[end_wall] >= LASER_SAFETY_MM &&
+        filtered.distance_mm[end_wall] <= wall_reserve && route_laser_valid(sample, end_wall, now) &&
+        sample->distance_mm[end_wall] >= LASER_SAFETY_MM && sample->distance_mm[end_wall] <= wall_accept_mm &&
+        route_is_stationary(velocity);
+    const bool recovered_arrival = test_vy && route_wall_trim_confirmed(sample, recovery_wall, now);
+    const bool wall_arrival = (near_wall && remaining <= ROUTE_WALL_END_WINDOW_M) || recovered_arrival;
+    const bool wheel_arrival = remaining <= ROUTE_END_TOLERANCE_M;
+    if(wheel_arrival || wall_arrival) {
         const bool early_anchor = !leg->endpoint_side_trim && wall_arrival && remaining > ROUTE_END_TOLERANCE_M;
         route_begin_settle(now, early_anchor ? end_wall : LASER_NO_BEAM);
         return route_settle(leg, sample, end_wall, progress_m, velocity, imu_yaw, imu_wz, now);
@@ -839,12 +920,17 @@ AppControlResult app_odom_test_process(void) {
     }
     const LaserBeam side = leg->control_beam;
     if(index != 0u && !test_vy && (side == LASER_LEFT || side == LASER_RIGHT)) {
+        const bool side_valid = route_laser_valid(&filtered, side, now);
         const bool raw_close = route_laser_valid(sample, side, now) &&
                                sample->distance_mm[side] < LASER_SAFETY_MM;
         const bool too_close = s_odom_test.connector_hold ?
             filtered.distance_mm[side] < LASER_CONNECT_RESUME_MM :
             filtered.distance_mm[side] <= LASER_CONNECT_HOLD_MM;
-        s_odom_test.connector_hold = raw_close || !route_laser_valid(&filtered, side, now) || too_close;
+        s_odom_test.connector_hold = raw_close || !side_valid || too_close;
+        if(side_valid && too_close) {
+            const float escape_speed = fmaxf(LASER_SIDE_ESCAPE_MIN_MPS, fabsf(s_odom_test.correction_mps));
+            s_odom_test.correction_mps = side == LASER_LEFT ? escape_speed : -escape_speed;
+        }
     }
 
     /* Position-based trapezoid: acceleration uses 400 mm from the leg start,
@@ -853,8 +939,8 @@ AppControlResult app_odom_test_process(void) {
     const float accel_speed = route_acceleration_speed(progress_m);
     const float braking_speed = route_braking_speed(remaining);
     float speed_limit = fminf(leg->speed_mps, fminf(accel_speed, braking_speed));
-    const float wall_speed = wall_valid ? route_wall_speed_limit(filtered.distance_mm[end_wall], wall_reserve) :
-                                         leg->speed_mps;
+    const float wall_speed = wall_valid ?
+        route_wall_speed_limit(filtered.distance_mm[end_wall], wall_reserve, leg->speed_mps) : leg->speed_mps;
     speed_limit = fminf(speed_limit, wall_speed);
     if(s_odom_test.connector_hold) speed_limit = 0.0f;
     RouteSpeedPhase speed_phase = ROUTE_SPEED_CRUISE;

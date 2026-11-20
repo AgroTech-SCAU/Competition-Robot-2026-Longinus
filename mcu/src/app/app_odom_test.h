@@ -29,6 +29,8 @@ bool app_odom_test_is_done(void);
 
 void app_odom_test_set_work_range(bool frame_received, uint16_t distance_mm, uint32_t stamp_ms);
 bool app_odom_test_work_pump_enabled(void);
+bool app_odom_test_entry_pump_enabled(void);
+bool app_odom_test_entry_pa0_enabled(void);
 
 /* Run the route once in Auto after motor preparation, then hold zero speed. */
 AppControlResult app_odom_test_process(void);

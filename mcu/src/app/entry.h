@@ -197,10 +197,13 @@ static inline void entry_loop(void) {
         }
         app_runtime_process(HAL_GPIO_ReadPin(USER_KEY_GPIO_Port, USER_KEY_Pin) == GPIO_PIN_RESET);
         /* Runtime may cancel Auto this cycle. Apply the final owner once. */
-        const bool auto_pump = app_runtime_get_state() == APP_FSM_STATE_AUTO &&
-                               app_odom_test_work_pump_enabled();
-        entry_write_pump_output(auto_pump || s_entry_manual_pump_enabled,
-                                s_entry_manual_pump_relays);
+        const bool auto_mode = app_runtime_get_state() == APP_FSM_STATE_AUTO;
+        const bool auto_pump = auto_mode && app_odom_test_work_pump_enabled();
+        const bool entry_pump = auto_mode && app_odom_test_entry_pump_enabled();
+        const bool entry_pa0 = entry_pump && app_odom_test_entry_pa0_enabled();
+        /* The entry task drives PA0 through the existing relay 1 output. */
+        entry_write_pump_output(auto_mode ? (entry_pump || auto_pump) : s_entry_manual_pump_enabled,
+                                auto_mode ? (entry_pa0 ? APP_PUMP_RELAY_1 : 0u) : s_entry_manual_pump_relays);
         assemble_scheduler_finish_tick();
     }
     app_status_process();
