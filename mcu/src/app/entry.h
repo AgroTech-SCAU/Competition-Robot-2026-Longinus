@@ -78,6 +78,23 @@ static inline bool entry_chassis_settle(ms_t interval_ms) {
     return true;
 }
 
+static inline void entry_set_pump_output(bool enabled, uint8_t relays) {
+    if(!enabled) {
+        HAL_GPIO_WritePin(PUMP_EN_GPIO_Port, PUMP_EN_Pin, GPIO_PIN_RESET);
+        relays = 0u;
+    }
+
+    const uint32_t pa_on = ((relays & APP_PUMP_RELAY_1) ? GPIO_PIN_0 : 0u) |
+                           ((relays & APP_PUMP_RELAY_2) ? GPIO_PIN_2 : 0u);
+    const uint32_t pe_on = ((relays & APP_PUMP_RELAY_3) ? GPIO_PIN_9 : 0u) |
+                           ((relays & APP_PUMP_RELAY_4) ? GPIO_PIN_13 : 0u);
+    /* Set and reset each pair in one write so reversal cannot assert both relays. */
+    GPIOA->BSRR = pa_on | (((GPIO_PIN_0 | GPIO_PIN_2) & ~pa_on) << 16u);
+    GPIOE->BSRR = pe_on | (((GPIO_PIN_9 | GPIO_PIN_13) & ~pe_on) << 16u);
+
+    if(enabled) HAL_GPIO_WritePin(PUMP_EN_GPIO_Port, PUMP_EN_Pin, GPIO_PIN_SET);
+}
+
 static inline void entry_init(void) {
     if(!entry_boot_check(assemble_delay(), "delay"))
         return;
@@ -91,6 +108,12 @@ static inline void entry_init(void) {
     if(!entry_boot_check(assemble_rgb(), "rgb"))
         return;
     log_info("BOOT rgb ready");
+    delay_ms(100u);
+
+    /* IMU yaw hold is independent of wheel-only route odometry. */
+    if(!entry_boot_check(assemble_imu(), "imu"))
+        return;
+    log_info("BOOT imu ready");
     delay_ms(100u);
 
     if(!entry_boot_check(assemble_odom(), "odom"))
@@ -117,6 +140,7 @@ static inline void entry_init(void) {
     {
         remote_init();
 
+        app_runtime_set_pump_output(entry_set_pump_output);
         app_runtime_init();
         app_status_init();
     }

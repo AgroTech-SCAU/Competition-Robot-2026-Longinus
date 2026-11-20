@@ -13,3 +13,9 @@ external/
 .project
 STM32H723VGTX_FLASH.ld
 STM32H723VGTX_RAM.ld
+
+# 当前状态估计图需要随 README 一起纳入版本管理。
+!docs/
+docs/*
+!docs/state_estimation_dataflow_mindmap.png
+!docs/draw_state_estimation_dataflow_mindmap.py

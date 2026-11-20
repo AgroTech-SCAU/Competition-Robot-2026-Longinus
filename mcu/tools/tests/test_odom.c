@@ -327,7 +327,30 @@ static void test_wheel_only_motion_and_feedback_gaps(void) {
     assert(odom_process() == ODOM_NOT_READY && state->discontinuity_count == 2u);
     assert(odom_get_gyro_corrected(&(Vector3){0}) == ODOM_NOT_READY);
 }
+static void test_wheel_only_samples_imu_without_fusing_pose(void) {
+    reset_case(false);
+    OdomConfig config = odom_default_config();
+    config.wheel_only = true;
+    config.now_us = clock_us;
+    assert(odom_init(&config) == ODOM_OK);
+    sample.gyro.z = 0.25f;
+    imu_angle.yaw = 0.2f;
+    advance(4000, true);
+    assert(odom_process() == ODOM_NOT_READY); /* First wheel frame only seeds timing. */
+    for(unsigned i = 0; i < 7; ++i) {
+        advance(4000, true);
+        assert(odom_process() == ODOM_OK);
+    }
+    const Odom* state = odom_get_state();
+    assert(state->wheel_only && state->imu_ready && state->imu_calibrated);
+    assert(odom_get_gyro_corrected(&(Vector3){0}) == ODOM_OK);
+    near(state->gyro_corrected.z, 0.25f, 1e-8f);
+    near(state->angle.z, 0.0f, 1e-8f); /* IMU yaw never replaces wheel pose. */
+    near(state->odom.x, 0.0f, 1e-8f);
+    near(state->odom.y, 0.0f, 1e-8f);
+}
 int main(void){
+    test_wheel_only_samples_imu_without_fusing_pose();
     test_wheel_only_motion_and_feedback_gaps();
     test_boot_calibration_gate();
     test_stationary_feedback_and_motion_exit();

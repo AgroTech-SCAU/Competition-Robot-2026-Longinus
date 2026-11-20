@@ -1,7 +1,9 @@
 #include "app_odom_test.h"
 
 #include "chassis.h"
+#include "chassis_yaw_hold.h"
 #include "delay.h"
+#include "imu.h"
 #include "laser_odom.h"
 #include "log.h"
 #include "map_route.h"
@@ -23,19 +25,21 @@
 #define LASER_FRONT_TARGET_MM 70.0f
 #define LASER_REAR_TARGET_MM 45.0f
 #define LASER_DUAL_TOLERANCE_MM 3.0f
-#define LASER_SIDE_TOLERANCE_MM 8.0f
+#define LASER_SIDE_TOLERANCE_MM 3.0f
 #define LASER_START_ACQUIRE_MM 105.0f
 #define LASER_CONTROL_DEADBAND_MM 3.0f
 #define LASER_FURROW_SUM_MIN_MM 50.0f
 #define LASER_FURROW_SUM_MAX_MM 125.0f
-#define LASER_CONTROL_GAIN 1.0f
-#define LASER_CORRECTION_LIMIT_MPS 0.06f
+#define LASER_SIDE_CONTROL_GAIN 2.5f
+#define LASER_SIDE_CORRECTION_LIMIT_MPS 0.09f
+#define LASER_DUAL_CONTROL_GAIN 1.0f
+#define LASER_DUAL_CORRECTION_LIMIT_MPS 0.06f
 #define LASER_CORRECTION_ACCEL_MPS2 0.30f
 #define LASER_FRAME_MAX_AGE_MS 120u
 #define LASER_FRONT_SAFETY_MM 55.0f
 #define LASER_SAFETY_MM 30.0f
-#define LASER_ESCAPE_GAIN 4.0f
-#define LASER_ESCAPE_LIMIT_MPS 0.12f
+#define LASER_ESCAPE_GAIN 2.5f
+#define LASER_ESCAPE_LIMIT_MPS 0.09f
 #define ROUTE_COMMAND_LIMIT_MPS 0.65f
 #define ROUTE_ALIGN_LOG_PERIOD_MS 250u
 
@@ -60,6 +64,7 @@ typedef struct {
     float remaining_m;
     float route_speed_mps;
     float correction_mps;
+    float front_correction_mps;
     float accel_mps2;
     float decel_mps2;
     float accel_distance_m;
@@ -68,18 +73,16 @@ typedef struct {
     float heading_cos;
     float heading_sin;
     uint32_t travel_ms;
-    uint32_t progress_ms;
     uint32_t settle_since_ms;
     uint32_t settle_ready_since_ms;
     uint32_t align_log_ms;
     uint32_t last_control_ms;
-    float last_progress_position_m;
+    uint32_t last_front_control_ms;
     bool laser_waiting;
     bool following_laser;
     bool final_approach;
     bool guidance_acquired;
-    bool alignment_seen;
-    bool align_skip_logged;
+    bool yaw_target_valid;
     AppLaserFix laser;
 } AppOdomTestState;
 
@@ -101,6 +104,7 @@ static float route_clampf(float value, float limit) {
 
 void app_odom_test_reset(void) {
     s_odom_test = (AppOdomTestState){ 0 };
+    chassis_yaw_hold_disable();
 }
 
 AppLaserFix app_odom_test_get_laser_fix(void) {
@@ -154,10 +158,12 @@ static float route_lateral_target(const MapRouteLeg* leg, const LaserOdomSample*
     if(MAP_ROUTE_LASER_GUIDANCE_ENABLED == 0 || beam == LASER_NO_BEAM ||
        !route_laser_valid(sample, beam, now)) return 0.0f;
     /* The open-field launch ignores the distant left wall until its first
-     * <=105 mm acquisition. Acquisition is latched for the rest of leg 01. */
-    if(s_odom_test.segment_index == 0u && !s_odom_test.guidance_acquired) return 0.0f;
+     * <=105 mm acquisition. Settling may still acquire it directly at 45 mm. */
+    if(s_odom_test.segment_index == 0u && s_odom_test.phase == ROUTE_TRAVEL &&
+       !s_odom_test.guidance_acquired) return 0.0f;
 
     float target;
+    float correction_limit = LASER_SIDE_CORRECTION_LIMIT_MPS;
     if(beam == LASER_FRONT && leg->furrow_gate) {
         if(!route_furrow_gate(sample, now)) return 0.0f;
         /* FRONT=-vx and REAR=+vx. Average independent 70/45 mm controllers so
@@ -166,7 +172,8 @@ static float route_lateral_target(const MapRouteLeg* leg, const LaserOdomSample*
                                                         LASER_FRONT_TARGET_MM);
         const float rear_error = route_target_error_mm(sample->distance_mm[LASER_REAR],
                                                        LASER_REAR_TARGET_MM);
-        target = 0.5f * (rear_error - front_error) * LASER_CONTROL_GAIN * 0.001f;
+        target = 0.5f * (rear_error - front_error) * LASER_DUAL_CONTROL_GAIN * 0.001f;
+        correction_limit = LASER_DUAL_CORRECTION_LIMIT_MPS;
         s_odom_test.laser.track_mask = (1u << LASER_FRONT) | (1u << LASER_REAR);
     }
     else {
@@ -175,7 +182,7 @@ static float route_lateral_target(const MapRouteLeg* leg, const LaserOdomSample*
                                                      LASER_SIDE_TARGET_MM);
         /* LEFT=-vy, RIGHT=+vy: positive range error approaches that wall. */
         const float beam_sign = beam == LASER_RIGHT ? 1.0f : -1.0f;
-        target = beam_sign * LASER_CONTROL_GAIN * error_mm * 0.001f;
+        target = beam_sign * LASER_SIDE_CONTROL_GAIN * error_mm * 0.001f;
         s_odom_test.laser.track_mask = 1u << beam;
     }
     /* Leg 15 travels across on vy but its LEFT settle override also uses vy.
@@ -184,16 +191,30 @@ static float route_lateral_target(const MapRouteLeg* leg, const LaserOdomSample*
     const bool correction_vx = leg->settle_beam == LASER_NO_BEAM ? test_vy :
                                (beam == LASER_FRONT || beam == LASER_REAR);
     s_odom_test.laser.mask = correction_vx ? APP_LASER_X : APP_LASER_Y;
-    return route_clampf(target, LASER_CORRECTION_LIMIT_MPS);
+    return route_clampf(target, correction_limit);
 }
 
-static float route_slew_correction(float target, uint32_t now) {
+/* Only leg 01 uses standalone FRONT settling: it approaches the far wall in
+ * the FRONT direction. FRONT independently controls vx; LEFT controls vy. */
+static float route_front_target(const LaserOdomSample* sample, uint32_t now) {
+    if(MAP_ROUTE_LASER_GUIDANCE_ENABLED == 0 ||
+       !route_laser_valid(sample, LASER_FRONT, now)) return 0.0f;
+    const float error_mm = route_target_error_mm(sample->distance_mm[LASER_FRONT],
+                                                 LASER_FRONT_TARGET_MM);
+    s_odom_test.laser.track_mask |= 1u << LASER_FRONT;
+    s_odom_test.laser.mask |= APP_LASER_X;
+    return route_clampf(-LASER_DUAL_CONTROL_GAIN * error_mm * 0.001f,
+                        LASER_DUAL_CORRECTION_LIMIT_MPS);
+}
+
+static float route_slew_correction(float target, float* correction_mps,
+                                   uint32_t* last_control_ms, uint32_t now) {
     const float dt = fminf(APP_ODOM_TEST_CONTROL_PERIOD_S * 10.0f,
-                           (float)(now - s_odom_test.last_control_ms) * 0.001f);
-    s_odom_test.last_control_ms = now;
-    if(target == 0.0f || target * s_odom_test.correction_mps < 0.0f) return 0.0f;
+                           (float)(now - *last_control_ms) * 0.001f);
+    *last_control_ms = now;
+    if(target == 0.0f || target * *correction_mps < 0.0f) return 0.0f;
     const float step = LASER_CORRECTION_ACCEL_MPS2 * dt;
-    const float previous = fabsf(s_odom_test.correction_mps);
+    const float previous = fabsf(*correction_mps);
     return copysignf(fminf(fabsf(target), previous + step), target);
 }
 
@@ -285,8 +306,8 @@ static RouteEscape route_safety_escape(const MapRouteLeg* leg, const LaserOdomSa
 }
 
 static AppControlResult route_send_command(const MapRouteLeg* leg, const LaserOdomSample* sample,
-                                           uint32_t now, float yaw, float vx_route, float vy_route,
-                                           bool* safety_active) {
+                                           uint32_t now, float yaw, float measured_wz,
+                                           float vx_route, float vy_route, bool* safety_active) {
     const RouteEscape escape = route_safety_escape(leg, sample, now, vx_route, vy_route);
     s_odom_test.laser.jump_mask = escape.mask;
     *safety_active = escape.mask != 0u;
@@ -295,8 +316,10 @@ static AppControlResult route_send_command(const MapRouteLeg* leg, const LaserOd
     const float s = sinf(yaw) * s_odom_test.heading_cos - cosf(yaw) * s_odom_test.heading_sin;
     const float vx_cmd = c * escape.vx + s * escape.vy;
     const float vy_cmd = c * escape.vy - s * escape.vx;
-    /* Auto is translation-only under every condition: wz is always zero. */
-    if(chassis.set_velocity(vx_cmd, vy_cmd, 0.0f) != CHASSIS_OK) {
+    /* The route never requests rotation; wz only corrects the latched heading. */
+    const float wz_cmd = chassis_yaw_hold_apply(vx_cmd, vy_cmd, 0.0f, yaw, measured_wz,
+                                                APP_ODOM_TEST_CONTROL_PERIOD_S);
+    if(chassis.set_velocity(vx_cmd, vy_cmd, wz_cmd) != CHASSIS_OK) {
         return APP_CONTROL_RESULT_CHASSIS_ERROR;
     }
     return APP_CONTROL_RESULT_OK;
@@ -317,18 +340,17 @@ static void route_start_leg(const MapRouteLeg* leg, float distance_m, Vector3 po
                              (2.0f * s_odom_test.accel_distance_m);
     s_odom_test.decel_mps2 = leg->speed_mps * leg->speed_mps /
                              (2.0f * s_odom_test.decel_distance_m);
-    s_odom_test.travel_ms = s_odom_test.progress_ms = now;
+    s_odom_test.travel_ms = now;
     s_odom_test.last_control_ms = now;
-    s_odom_test.last_progress_position_m = -INFINITY;
+    s_odom_test.last_front_control_ms = now;
     s_odom_test.settle_ready_since_ms = 0u;
     s_odom_test.laser_waiting = false;
     s_odom_test.following_laser = false;
     s_odom_test.final_approach = false;
     s_odom_test.guidance_acquired = false;
-    s_odom_test.alignment_seen = false;
-    s_odom_test.align_skip_logged = false;
     s_odom_test.route_speed_mps = 0.0f;
     s_odom_test.correction_mps = 0.0f;
+    s_odom_test.front_correction_mps = 0.0f;
     log_info("MAP TRAVEL %u/%u goal=(%.2f,%.2f) vmax=%.2f",
              (unsigned int)s_odom_test.segment_index + 1u, (unsigned int)map_route_count,
              (double)leg->x_m, (double)leg->y_m, (double)leg->speed_mps);
@@ -345,8 +367,8 @@ static void route_begin_settle(uint32_t now) {
     s_odom_test.align_log_ms = now;
     s_odom_test.route_speed_mps = 0.0f;
     s_odom_test.correction_mps = 0.0f;
-    s_odom_test.alignment_seen = false;
-    s_odom_test.align_skip_logged = false;
+    s_odom_test.front_correction_mps = 0.0f;
+    s_odom_test.last_front_control_ms = now;
     s_odom_test.following_laser = false;
     route_log_speed_phase(ROUTE_SPEED_STOP, 0.0f, now);
     s_odom_test.laser.anchor_mask = s_odom_test.segment_index == 0u ? 1u << LASER_FRONT : 0u;
@@ -365,6 +387,7 @@ static AppControlResult route_next_or_park(uint32_t now) {
         s_odom_test.speed_phase = ROUTE_SPEED_STOP;
         s_odom_test.route_speed_mps = 0.0f;
         s_odom_test.correction_mps = 0.0f;
+        s_odom_test.front_correction_mps = 0.0f;
         s_odom_test.settle_ready_since_ms = 0u;
         log_info("MAP NEXT %u/%u", (unsigned int)s_odom_test.segment_index + 1u,
                  (unsigned int)map_route_count);
@@ -376,25 +399,29 @@ static AppControlResult route_next_or_park(uint32_t now) {
     s_odom_test.remaining_m = 0.0f;
     s_odom_test.route_speed_mps = 0.0f;
     s_odom_test.correction_mps = 0.0f;
+    s_odom_test.front_correction_mps = 0.0f;
     s_odom_test.settle_ready_since_ms = now;
     log_info("MAP PARKED");
     return stop;
 }
 
 static AppControlResult route_settle(const MapRouteLeg* leg, const LaserOdomSample* sample,
-                                     bool test_vy, Vector3 velocity, float yaw, uint32_t now) {
+                                     bool test_vy, Vector3 velocity, float imu_yaw, float imu_wz,
+                                     uint32_t now) {
     const LaserBeam beam = leg->settle_beam == LASER_NO_BEAM ? leg->control_beam : leg->settle_beam;
     const bool dual = beam == LASER_FRONT && leg->furrow_gate;
     const bool gate_open = !dual || route_furrow_gate(sample, now);
+    const size_t index = s_odom_test.segment_index;
+    /* Only 01 approaches the far end in the FRONT direction. On later +vx
+     * connectors FRONT looks back at the previous furrow: forcing 70 mm there
+     * would command -vx and pull the vehicle back to that previous furrow. */
+    const bool front_settle = MAP_ROUTE_LASER_GUIDANCE_ENABLED != 0 && index == 0u;
     const bool alignment_required = MAP_ROUTE_LASER_GUIDANCE_ENABLED != 0 &&
-                                    beam != LASER_NO_BEAM && beam != LASER_REAR && gate_open &&
-                                    (s_odom_test.segment_index != 0u || s_odom_test.guidance_acquired);
+                                    beam != LASER_NO_BEAM && beam != LASER_REAR && gate_open;
     const bool alignment_valid = alignment_required && route_laser_valid(sample, beam, now);
-    const bool alignment_mandatory = s_odom_test.segment_index == 14u; /* 15 -> 16: LEFT=45. */
-    if(alignment_valid) s_odom_test.alignment_seen = true;
+    const bool front_valid = front_settle && route_laser_valid(sample, LASER_FRONT, now);
 
-    bool aligned = !alignment_required || (!alignment_valid && !s_odom_test.alignment_seen &&
-                                           !alignment_mandatory);
+    bool aligned = !alignment_required;
     if(alignment_valid) {
         const float target_mm = dual ? LASER_FRONT_TARGET_MM : LASER_SIDE_TARGET_MM;
         const float tolerance_mm = dual ? LASER_DUAL_TOLERANCE_MM : LASER_SIDE_TOLERANCE_MM;
@@ -405,43 +432,61 @@ static AppControlResult route_settle(const MapRouteLeg* leg, const LaserOdomSamp
                           LASER_DUAL_TOLERANCE_MM;
         }
     }
-    if(alignment_required && !alignment_valid && !s_odom_test.alignment_seen &&
-       !alignment_mandatory && !s_odom_test.align_skip_logged) {
-        s_odom_test.align_skip_logged = true;
-        log_warn("MAP ALIGN SKIP seg=%u beam=%u: no fresh wall, use wheel waypoint",
-                 (unsigned int)s_odom_test.segment_index + 1u, (unsigned int)beam);
-    }
+    /* 01 requires side Y and front X. Later connectors retain wheel X and
+     * require only their side Y; missing required data never switches legs. */
+    const bool front_aligned = !front_settle ||
+                               (front_valid &&
+                                fabsf((float)sample->distance_mm[LASER_FRONT] -
+                                      LASER_FRONT_TARGET_MM) <= LASER_DUAL_TOLERANCE_MM);
+    aligned = aligned && front_aligned;
 
     const float correction_target = route_lateral_target(leg, sample, test_vy, beam, now);
-    s_odom_test.correction_mps = route_slew_correction(correction_target, now);
+    s_odom_test.correction_mps = route_slew_correction(correction_target,
+                                                       &s_odom_test.correction_mps,
+                                                       &s_odom_test.last_control_ms, now);
     if(s_odom_test.laser.mask == 0u) s_odom_test.correction_mps = 0.0f;
+    const float front_target = front_settle ? route_front_target(sample, now) : 0.0f;
+    s_odom_test.front_correction_mps = route_slew_correction(front_target,
+                                                             &s_odom_test.front_correction_mps,
+                                                             &s_odom_test.last_front_control_ms, now);
     s_odom_test.following_laser = s_odom_test.laser.mask != 0u;
     if(now - s_odom_test.align_log_ms >= ROUTE_ALIGN_LOG_PERIOD_MS) {
         s_odom_test.align_log_ms = now;
-        if(alignment_valid && dual) {
+        if(front_settle && alignment_valid && front_valid) {
+            log_info("MAP ALIGN START seg=1 F=%u side=%u corr=(%.3f,%.3f)",
+                     (unsigned int)sample->distance_mm[LASER_FRONT],
+                     (unsigned int)sample->distance_mm[beam],
+                     (double)s_odom_test.front_correction_mps,
+                     (double)s_odom_test.correction_mps);
+        }
+        else if(front_settle) {
+            log_warn("MAP ALIGN WAIT seg=1: start requires fresh FRONT and LEFT");
+        }
+        else if(alignment_valid && dual) {
             log_info("MAP ALIGN DUAL seg=%u F=%u B=%u target=70/45 corr=%.3f",
-                     (unsigned int)s_odom_test.segment_index + 1u,
+                     (unsigned int)index + 1u,
                      (unsigned int)sample->distance_mm[LASER_FRONT],
                      (unsigned int)sample->distance_mm[LASER_REAR],
                      (double)s_odom_test.correction_mps);
         }
         else if(alignment_valid) {
             log_info("MAP ALIGN seg=%u beam=%u raw=%u target=45 corr=%.3f",
-                     (unsigned int)s_odom_test.segment_index + 1u, (unsigned int)beam,
+                     (unsigned int)index + 1u, (unsigned int)beam,
                      (unsigned int)sample->distance_mm[beam], (double)s_odom_test.correction_mps);
         }
-        else if(alignment_required && (s_odom_test.alignment_seen || alignment_mandatory)) {
+        else if(alignment_required) {
             log_warn("MAP ALIGN WAIT seg=%u beam=%u: waiting for fresh frame",
-                     (unsigned int)s_odom_test.segment_index + 1u, (unsigned int)beam);
+                     (unsigned int)index + 1u, (unsigned int)beam);
         }
     }
     const bool correction_vx = leg->settle_beam == LASER_NO_BEAM ? test_vy :
                                (beam == LASER_FRONT || beam == LASER_REAR);
-    const float vx_route = correction_vx ? s_odom_test.correction_mps : 0.0f;
+    const float vx_route = front_settle ? s_odom_test.front_correction_mps :
+                           (correction_vx ? s_odom_test.correction_mps : 0.0f);
     const float vy_route = correction_vx ? 0.0f : s_odom_test.correction_mps;
 
     bool safety_active = false;
-    const AppControlResult command = route_send_command(leg, sample, now, yaw,
+    const AppControlResult command = route_send_command(leg, sample, now, imu_yaw, imu_wz,
                                                         vx_route, vy_route, &safety_active);
     if(command != APP_CONTROL_RESULT_OK) return command;
 
@@ -456,8 +501,8 @@ static AppControlResult route_settle(const MapRouteLeg* leg, const LaserOdomSamp
         s_odom_test.settle_ready_since_ms = 0u;
     }
 
-    /* No alignment timeout: valid distant walls are corrected until aligned.
-     * Leg 15 always waits for LEFT; other missing walls may use wheel position. */
+    /* Required side/front/dual alignment has no timeout: wait and keep trimming.
+     * A closed dual-beam furrow gate remains exempt during crossing windows. */
     return APP_CONTROL_RESULT_OK;
 }
 
@@ -468,8 +513,28 @@ AppControlResult app_odom_test_process(void) {
     Vector3 position, angle, velocity;
     if(odom.get_odom(&position) != ODOM_OK || odom.get_angle(&angle) != ODOM_OK ||
        odom.get_velocity(&velocity) != ODOM_OK || !route_finite_vec3(position) ||
-       !isfinite(angle.z) || !route_finite_vec3(velocity)) {
+       !isfinite(angle.z) || !route_finite_vec3(velocity) || !odom.get_state()->imu_ready) {
         return APP_CONTROL_RESULT_ODOM_ERROR;
+    }
+
+    /* Auto heading feedback comes only from the IMU, never from wheel yaw. */
+    const ImuAngle imu_angle = imu.get_angle();
+    const ImuGyro imu_gyro = imu_get_gyro_corrected();
+    const float cos_pitch = cosf(imu_angle.pitch);
+    if(!isfinite(imu_angle.roll) || !isfinite(imu_angle.pitch) || !isfinite(imu_angle.yaw) ||
+       !isfinite(imu_gyro.x) || !isfinite(imu_gyro.y) || !isfinite(imu_gyro.z) ||
+       fabsf(cos_pitch) <= 0.2f) {
+        return APP_CONTROL_RESULT_ODOM_ERROR;
+    }
+    const float imu_yaw = imu_angle.yaw;
+    const float imu_wz = (imu_gyro.y * sinf(imu_angle.roll) +
+                          imu_gyro.z * cosf(imu_angle.roll)) / cos_pitch;
+    if(!isfinite(imu_wz)) return APP_CONTROL_RESULT_ODOM_ERROR;
+    if(!s_odom_test.yaw_target_valid) {
+        /* First valid IMU sample in Auto owns the reference for the whole route. */
+        chassis_yaw_hold_set_target(imu_yaw);
+        s_odom_test.yaw_target_valid = true;
+        log_info("AUTO IMU YAW LOCK ref=%.5f", (double)imu_yaw);
     }
 
     const size_t index = s_odom_test.segment_index;
@@ -506,7 +571,7 @@ AppControlResult app_odom_test_process(void) {
     };
 
     if(s_odom_test.phase == ROUTE_SETTLE) {
-        return route_settle(leg, sample, test_vy, velocity, angle.z, now);
+        return route_settle(leg, sample, test_vy, velocity, imu_yaw, imu_wz, now);
     }
 
     /* 01 alone uses a fresh front range for immediate endpoint acquisition.
@@ -525,12 +590,14 @@ AppControlResult app_odom_test_process(void) {
     }
     if(endpoint_ready) {
         route_begin_settle(now);
-        return route_settle(leg, sample, test_vy, velocity, angle.z, now);
+        return route_settle(leg, sample, test_vy, velocity, imu_yaw, imu_wz, now);
     }
 
     const float correction_target = route_lateral_target(leg, sample, test_vy,
                                                           leg->control_beam, now);
-    s_odom_test.correction_mps = route_slew_correction(correction_target, now);
+    s_odom_test.correction_mps = route_slew_correction(correction_target,
+                                                       &s_odom_test.correction_mps,
+                                                       &s_odom_test.last_control_ms, now);
     if(s_odom_test.laser.mask == 0u) s_odom_test.correction_mps = 0.0f;
     s_odom_test.following_laser = s_odom_test.laser.mask != 0u;
 
@@ -582,18 +649,11 @@ AppControlResult app_odom_test_process(void) {
     const float vx_route = test_vy ? s_odom_test.correction_mps : drive;
     const float vy_route = test_vy ? drive : s_odom_test.correction_mps;
     bool safety_active = false;
-    const AppControlResult command = route_send_command(leg, sample, now, angle.z,
+    const AppControlResult command = route_send_command(leg, sample, now, imu_yaw, imu_wz,
                                                         vx_route, vy_route, &safety_active);
     if(command != APP_CONTROL_RESULT_OK) return command;
 
-    if(wait_laser || safety_active || sign * along >= s_odom_test.last_progress_position_m + 0.008f) {
-        s_odom_test.last_progress_position_m = sign * along;
-        s_odom_test.progress_ms = now;
-    }
-    else if(now - s_odom_test.progress_ms > 2000u) {
-        log_warn("MAP no progress seg=%u rem=%.3f", (unsigned int)index + 1u, (double)remaining);
-        return APP_CONTROL_RESULT_ODOM_ERROR;
-    }
+    (void)safety_active;
     s_odom_test.laser.correction_mps = s_odom_test.correction_mps;
     return APP_CONTROL_RESULT_OK;
 }

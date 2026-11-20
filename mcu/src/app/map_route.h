@@ -17,6 +17,7 @@ typedef struct {
     float speed_mps;
     LaserBeam control_beam; /* Travel target; FRONT+REAR are combined when gated. */
     LaserBeam settle_beam;  /* NO_BEAM reuses control_beam; leg 15 overrides to LEFT. */
+                            /* Only leg 01 also settles FRONT=70 mm; later connectors use wheel X. */
     bool furrow_gate;       /* Front+rear=50..125 mm enables dual-axis centering. */
     bool rear_escape;       /* Rear 30 mm protection only on 05/07/.../15. */
 } MapRouteLeg;

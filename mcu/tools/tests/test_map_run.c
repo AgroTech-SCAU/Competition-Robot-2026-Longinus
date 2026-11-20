@@ -1,10 +1,11 @@
 /* Replay the 16-leg route through the production Auto entry point. The wheel
- * pose follows the commanded body twist on a level floor. Laser frames are
- * deliberately extreme: with guidance disabled they must not affect motion. */
+ * pose follows the commanded body twist on a level floor. Target laser frames
+ * exercise settling; missing/off-target frames must block required switches. */
 #include "app_odom_test.h"
 #include "chassis.h"
 #include "chassis_yaw_hold.h"
 #include "delay.h"
+#include "imu.h"
 #include "laser_odom.h"
 #include "log.h"
 #include "odom.h"
@@ -24,7 +25,9 @@ enum { LEG_COUNT = sizeof(waypoints) / sizeof(waypoints[0]) - 1 };
 
 static uint32_t now_ms;
 static Vector3 position, velocity, angle, command;
-static bool wheel_online;
+static ImuAngle imu_angle;
+static Odom odom_state;
+static bool wheel_online, imu_online;
 static float translation_lag_s;
 
 ms_t delay_now_ms(void) { return now_ms; }
@@ -41,8 +44,18 @@ OdomStatus odom_relocalize_xy(float x, float y) {
 }
 static OdomStatus get_angle(Vector3* out) { *out = angle; return wheel_online ? ODOM_OK : ODOM_NOT_READY; }
 static OdomStatus get_velocity(Vector3* out) { *out = velocity; return wheel_online ? ODOM_OK : ODOM_NOT_READY; }
+static const Odom* get_odom_state(void) {
+    odom_state.imu_ready = imu_online;
+    return &odom_state;
+}
 const struct OdomInterface odom_interface = {
     .get_odom = get_position, .get_angle = get_angle, .get_velocity = get_velocity,
+    .get_state = get_odom_state,
+};
+static ImuAngle get_imu_angle(void) { return imu_angle; }
+static ImuGyro get_imu_gyro(void) { return (ImuGyro){ 0.0f, 0.0f, velocity.z }; }
+static const ImuInterface mock_imu = {
+    .get_angle = get_imu_angle, .get_gyro_corrected = get_imu_gyro,
 };
 static ChassisErrorCode set_velocity(float vx, float vy, float wz) {
     assert(isfinite(vx) && isfinite(vy) && isfinite(wz));
@@ -70,63 +83,127 @@ static void advance(void) {
     position.x += dt * (cosf(heading) * velocity.x - sinf(heading) * velocity.y);
     position.y += dt * (sinf(heading) * velocity.x + cosf(heading) * velocity.y);
     angle.z += velocity.z * dt;
+    imu_angle.yaw += velocity.z * dt;
     now_ms += 2u;
 }
-static void send_frame(LaserBeam beam, uint16_t range) {
+static void send_ranges(uint16_t front, uint16_t rear, uint16_t left, uint16_t right) {
     LaserOdomSample frame = {
-        .distance_mm = { UINT16_MAX, UINT16_MAX, UINT16_MAX, UINT16_MAX },
+        .distance_mm = { front, rear, left, right },
         .received = laser_odom_get_sample()->received + 1u, .stamp_ms = now_ms,
     };
-    if(beam != LASER_NO_BEAM) frame.distance_mm[beam] = range;
     laser_odom_receive(&frame);
 }
+static void send_ideal_frame(void) { send_ranges(70u, 45u, 45u, 45u); }
 static void reset(void) {
     app_odom_test_reset();
     const ChassisYawHoldConfig yaw_config = chassis_yaw_hold_wheel_config();
     chassis_yaw_hold_init(&yaw_config);
+    assert(imu_set_instance(&mock_imu) == IMU_STATUS_OK);
     now_ms = 1000u;
     position = (Vector3){ 1.3f, -0.4f, 0.0f };
     velocity = angle = command = (Vector3){ 0 };
-    wheel_online = true;
+    imu_angle = (ImuAngle){ 0 };
+    odom_state = (Odom){ 0 };
+    wheel_online = imu_online = true;
     translation_lag_s = 0.0f;
     laser_odom_receive(&(LaserOdomSample){ 0 });
 }
-static void process(void) {
-    assert(app_odom_test_process() == APP_CONTROL_RESULT_OK);
-    const AppLaserFix fix = app_odom_test_get_laser_fix();
-    assert(fix.mask == 0u && fix.track_mask == 0u && fix.anchor_mask == 0u);
-}
-static void opening_run(bool inject_laser, Point* final_position, Vector3* final_command) {
-    reset();
-    for(unsigned i = 0; i < 1000u; ++i) {
+static void process(void) { assert(app_odom_test_process() == APP_CONTROL_RESULT_OK); }
+static void run_ideal_cycles(unsigned cycles) {
+    for(unsigned i = 0; i < cycles; ++i) {
         advance();
-        if(inject_laser && i % 10u == 0u)
-            send_frame(LASER_LEFT, i % 20u == 0u ? 17u : 7000u);
+        if(i % 10u == 0u) send_ideal_frame();
         process();
     }
-    *final_position = field_position();
-    *final_command = command;
 }
-static void test_laser_frames_are_inert(void) {
-    Point without_laser, with_laser;
-    Vector3 command_without_laser, command_with_laser;
-    opening_run(false, &without_laser, &command_without_laser);
-    opening_run(true, &with_laser, &command_with_laser);
-    assert(command_without_laser.x < -0.05f);
-    assert(fabsf(with_laser.x - without_laser.x) < 1e-6f);
-    assert(fabsf(with_laser.y - without_laser.y) < 1e-6f);
-    assert(fabsf(command_with_laser.x - command_without_laser.x) < 1e-6f);
-    assert(fabsf(command_with_laser.y - command_without_laser.y) < 1e-6f);
-    assert(fabsf(command_with_laser.z - command_without_laser.z) < 1e-6f);
+static void test_laser_offline_holds_controlled_route(void) {
+    reset();
+    const Point start = field_position();
+    for(unsigned i = 0; i < 1000u; ++i) { advance(); process(); }
+    const Point p = field_position();
+    assert(command.x == 0.0f && command.y == 0.0f);
+    assert(fabsf(p.x - start.x) < 1e-6f && fabsf(p.y - start.y) < 1e-6f);
+    assert(app_odom_test_get_laser_fix().segment == 1u);
+}
+static void test_start_alignment_is_mandatory(void) {
+    reset();
+    /* Reach the 01 endpoint with no usable LEFT. It must settle and wait. */
+    for(unsigned i = 0; i < 15000u; ++i) {
+        advance();
+        if(i % 10u == 0u) send_ranges(70u, 45u, UINT16_MAX, 45u);
+        process();
+    }
+    assert(app_odom_test_get_laser_fix().segment == 1u);
+    assert(app_odom_test_remaining_m() > 0.10f);
+    assert(command.x == 0.0f && command.y == 0.0f);
+
+    /* A distant LEFT approaches via -vy, but cannot authorize the switch. */
+    for(unsigned i = 0; i < 100u; ++i) {
+        advance();
+        if(i % 10u == 0u) send_ranges(70u, 45u, 60u, 45u);
+        process();
+    }
+    assert(app_odom_test_get_laser_fix().segment == 1u && command.y < 0.0f);
+
+    /* FRONT is an independent second condition: too far means -vx and wait. */
+    for(unsigned i = 0; i < 100u; ++i) {
+        advance();
+        if(i % 10u == 0u) send_ranges(80u, 45u, 45u, 45u);
+        process();
+    }
+    assert(app_odom_test_get_laser_fix().segment == 1u);
+    assert(command.x < 0.0f && command.y == 0.0f);
+
+    /* Losing FRONT also waits; fresh 70/45 frames then release leg 02. */
+    for(unsigned i = 0; i < 100u; ++i) {
+        advance();
+        if(i % 10u == 0u) send_ranges(UINT16_MAX, 45u, 45u, 45u);
+        process();
+    }
+    assert(app_odom_test_get_laser_fix().segment == 1u);
+    assert(command.x == 0.0f && command.y == 0.0f);
+    run_ideal_cycles(150u);
+    assert(app_odom_test_get_laser_fix().segment == 2u);
+}
+static void test_connectors_do_not_track_previous_front_wall(void) {
+    reset();
+    for(unsigned i = 0; i < 60000u && app_odom_test_get_laser_fix().segment < 4u; ++i) {
+        advance();
+        if(i % 10u == 0u) send_ideal_frame();
+        process();
+    }
+    assert(app_odom_test_get_laser_fix().segment == 4u);
+
+    /* After 700 mm of +vx travel, the previous front wall is about 770 mm
+     * behind. Leg 04 must finish by wheel X + LEFT Y, never drag that wall
+     * back to 70 mm with -vx. */
+    for(unsigned i = 0; i < 10000u && app_odom_test_get_laser_fix().segment == 4u; ++i) {
+        advance();
+        if(i % 10u == 0u) send_ranges(770u, 45u, 45u, 45u);
+        process();
+    }
+    assert(app_odom_test_get_laser_fix().segment == 5u);
+    assert(command.x == 0.0f);
 }
 static void test_wheel_feedback_is_mandatory(void) {
     reset();
-    for(unsigned i = 0; i < 500u; ++i) { advance(); process(); }
+    run_ideal_cycles(500u);
     assert(command.x < -0.05f);
     wheel_online = false;
     assert(app_odom_test_process() == APP_CONTROL_RESULT_ODOM_ERROR);
 }
-static void test_route(float lag_s, bool inject_laser) {
+static void test_imu_is_the_only_heading_feedback(void) {
+    reset();
+    run_ideal_cycles(500u);
+    const float wheel_only_wz = command.z;
+    angle.z += 0.2f; /* Wheel yaw disturbance must not enter the Auto angle loop. */
+    advance();
+    process();
+    assert(fabsf(command.z - wheel_only_wz) < 1e-7f);
+    imu_online = false;
+    assert(app_odom_test_process() == APP_CONTROL_RESULT_ODOM_ERROR);
+}
+static void test_route(float lag_s) {
     reset();
     translation_lag_s = lag_s;
     unsigned leg = 1u, seen = 0u;
@@ -134,16 +211,15 @@ static void test_route(float lag_s, bool inject_laser) {
     bool heading_recovered = false;
     uint32_t yaw_disturbance_ms = 0u;
     float max_stop_error = 0.0f;
-    Point farthest = waypoints[0];
     Point p = field_position();
     for(unsigned i = 0; i < 140000u && !app_odom_test_is_done(); ++i) {
         advance();
         p = field_position();
-        farthest.x = fmaxf(farthest.x, p.x);
-        farthest.y = fmaxf(farthest.y, p.y);
-        if(inject_laser && i % 10u == 0u) {
-            const LaserBeam beam = (LaserBeam)(leg % LASER_BEAM_COUNT);
-            send_frame(beam, (uint16_t)(30u + (i % 5000u)));
+        if(i % 10u == 0u) {
+            /* Keep 01 on its wheel approach until near the planned endpoint,
+             * then expose the 70 mm front target used by production settling. */
+            const uint16_t front = leg == 1u && 4.4f - p.y > 0.020f ? 500u : 70u;
+            send_ranges(front, 45u, 45u, 45u);
         }
         process();
         const float dx = waypoints[leg].x - waypoints[leg - 1u].x;
@@ -157,12 +233,12 @@ static void test_route(float lag_s, bool inject_laser) {
             ++seen;
             ++leg;
             if(leg == 3u) {
-                angle.z += 0.012f;
+                imu_angle.yaw += 0.012f;
                 yaw_disturbance_ms = now_ms;
             }
         }
         if(leg == 3u && now_ms - yaw_disturbance_ms > 1000u) {
-            assert(fabsf(angle.z) < 0.002f && fabsf(command.z) < 0.015f);
+            assert(fabsf(imu_angle.yaw) < 0.002f && fabsf(command.z) < 0.015f);
             heading_recovered = true;
         }
     }
@@ -173,22 +249,24 @@ static void test_route(float lag_s, bool inject_laser) {
     assert(app_odom_test_remaining_m() == 0.0f);
     for(unsigned i = 0; i < 100u; ++i) {
         advance();
-        send_frame(LASER_FRONT, 67u);
+        send_ideal_frame();
         process();
         assert(app_odom_test_is_done());
         assert(command.x == 0.0f && command.y == 0.0f && command.z == 0.0f);
     }
-    printf("PASS route: 16 legs, lag=%.0f ms, laser=%s, %.2f s, "
+    printf("PASS route: 16 legs, lag=%.0f ms, target lasers, %.2f s, "
            "max end error %.3f m, parked (%.3f,%.3f) m\n",
-           1000.0 * lag_s, inject_laser ? "ignored" : "absent",
-           (now_ms - 1200u) * 0.001, (double)max_stop_error, (double)p.x, (double)p.y);
+           1000.0 * lag_s, (now_ms - 1200u) * 0.001,
+           (double)max_stop_error, (double)p.x, (double)p.y);
 }
 int main(void) {
-    test_laser_frames_are_inert();
+    test_laser_offline_holds_controlled_route();
+    test_start_alignment_is_mandatory();
+    test_connectors_do_not_track_previous_front_wall();
     test_wheel_feedback_is_mandatory();
-    test_route(0.0f, false);
-    test_route(0.0f, true);
-    test_route(0.060f, true);
-    puts("PASS wheel-only Auto: laser inert, wheel faults retained, all directions covered");
+    test_imu_is_the_only_heading_feedback();
+    test_route(0.0f);
+    test_route(0.060f);
+    puts("PASS Auto: wheel position, IMU-only yaw hold, no connector front-wall pullback");
     return 0;
 }

@@ -18,9 +18,12 @@ static bool test_online, test_clear_event, test_clear_active;
 static bool test_key_pressed;
 static bool test_laser_online;
 static bool test_output_enabled, test_motor_ready;
+static bool test_pump_enabled;
+static uint8_t test_pump_relays;
 static unsigned test_enable_calls, test_zero_calls, test_manual_calls, test_auto_calls;
 static FsIa10bData test_remote;
 static Odom test_odom;
+static AppControlResult test_auto_result;
 
 ms_t delay_now_ms(void) { return test_now; }
 bool laser_odom_is_online(void) { return test_laser_online; }
@@ -78,9 +81,16 @@ AppControlResult app_control_apply_manual_chassis(void) {
     return APP_CONTROL_RESULT_OK;
 }
 AppControlResult app_odom_test_process(void) {
-    assert(test_output_enabled && chassis_ready() && odom_ready());
+    assert(test_output_enabled && chassis_ready());
     ++test_auto_calls;
-    return APP_CONTROL_RESULT_OK;
+    return test_auto_result;
+}
+
+static void set_test_pump_output(bool enabled, uint8_t relays) {
+    assert(!enabled || !test_output_enabled);
+    assert(enabled || relays == 0u);
+    test_pump_enabled = enabled;
+    test_pump_relays = relays;
 }
 
 static void reset_fixture(void) {
@@ -90,11 +100,13 @@ static void reset_fixture(void) {
     test_laser_online = true;
     test_clear_event = test_clear_active = false;
     test_output_enabled = test_motor_ready = false;
+    test_auto_result = APP_CONTROL_RESULT_OK;
     test_enable_calls = test_zero_calls = test_manual_calls = test_auto_calls = 0u;
     memset(&test_odom, 0, sizeof(test_odom));
     memset(&test_remote, 0, sizeof(test_remote));
     for(unsigned i = 0u; i < FS_IA10B_CHANNEL_COUNT; ++i) test_remote.channel[i] = REMOTE_CENTER;
     test_remote.channel[REMOTE_CH_SWD] = REMOTE_SW_HIGH; /* CH8 negative selects Manual. */
+    app_runtime_set_pump_output(set_test_pump_output);
     app_runtime_init();
 }
 static void step(uint32_t elapsed_ms) {
@@ -232,18 +244,39 @@ static void test_local_start_and_stop(void) {
     assert(app_runtime_get_state() == APP_FSM_STATE_AUTO && test_zero_calls == 1u);
     step(2u);
     assert(test_auto_calls == 1u && app_runtime_is_self_check_passed());
-    test_online = true;  /* A receiver appearing mid-race cannot select Manual. */
     key_level(true, 100u);
     assert(app_runtime_get_state() == APP_FSM_STATE_AUTO && test_manual_calls == 0u);
     key_level(false, 35u);
-    key_level(true, 35u);
+    key_level(true, 35u); /* Local EStop remains available while the radio is offline. */
     assert(app_runtime_get_state() == APP_FSM_STATE_ESTOP && !test_output_enabled);
     key_level(false, 35u);
     key_level(true, 35u);
     assert(app_runtime_get_state() == APP_FSM_STATE_ESTOP && !test_output_enabled);
 }
 
-static void test_key_ownership_and_fault(void) {
+static void test_radio_overrides_local_auto(void) {
+    reset_fixture();
+    all_ready();
+    test_online = false;
+    key_level(true, 500u);
+    key_level(false, 3u);
+    key_level(true, 40u);
+    key_level(false, 31u);
+    key_level(true, 5u);
+    key_level(false, 3u);
+    key_level(true, 29u);
+    step(1u);
+    assert(app_runtime_get_state() == APP_FSM_STATE_AUTO);
+    test_online = true; /* Default fixture requests Manual: radio takes over immediately. */
+    step(2u);
+    assert(app_runtime_get_state() == APP_FSM_STATE_MANUAL && !test_output_enabled);
+    step(2u);
+    assert(test_output_enabled && test_manual_calls == 0u);
+    step(2u);
+    assert(test_manual_calls == 1u && !app_runtime_has_fault());
+}
+
+static void test_key_ownership_and_auto_odom_error(void) {
     reset_fixture();
     all_ready();
     test_remote.channel[REMOTE_CH_SWD] = REMOTE_CENTER;
@@ -258,22 +291,129 @@ static void test_key_ownership_and_fault(void) {
     step(2u);
     assert(test_auto_calls == 1u);
     test_odom.wheel_valid = false;
+    test_auto_result = APP_CONTROL_RESULT_ODOM_ERROR;
+    step(2u);
+    assert(app_runtime_get_state() == APP_FSM_STATE_AUTO && test_output_enabled);
+    assert(!app_runtime_has_fault());
+    all_ready();
+    test_auto_result = APP_CONTROL_RESULT_OK;
+    test_online = test_clear_event = test_clear_active = true;
+    step(2u); /* Online radio stop/clear overrides local-race ownership. */
+    assert(app_runtime_get_state() == APP_FSM_STATE_IDLE && !test_output_enabled);
+    assert(!app_runtime_has_fault());
+}
+
+static void test_auto_errors_do_not_fault_or_insert_zero(void) {
+    reset_fixture();
+    all_ready();
+    test_remote.channel[REMOTE_CH_SWD] = REMOTE_SW_LOW;
+    step(2u);
+    step(2u);
+    assert(app_runtime_get_state() == APP_FSM_STATE_AUTO && test_auto_calls == 1u);
+    const unsigned zero_calls = test_zero_calls;
+
+    test_auto_result = APP_CONTROL_RESULT_ODOM_ERROR;
+    step(2u);
+    assert(app_runtime_get_state() == APP_FSM_STATE_AUTO && test_output_enabled);
+    assert(!app_runtime_has_fault() && test_zero_calls == zero_calls);
+    step(2u);
+    assert(!app_runtime_has_fault() && test_zero_calls == zero_calls);
+
+    test_auto_result = APP_CONTROL_RESULT_COMMAND_INVALID;
+    step(2u);
+    assert(app_runtime_get_state() == APP_FSM_STATE_AUTO && test_output_enabled);
+    assert(!app_runtime_has_fault() && test_zero_calls == zero_calls);
+
+    test_auto_result = APP_CONTROL_RESULT_OK;
+    step(2u);
+    assert(!app_runtime_has_fault() && test_zero_calls == zero_calls);
+
+    test_auto_result = APP_CONTROL_RESULT_ODOM_ERROR;
+    test_remote.channel[REMOTE_CH_SWD] = REMOTE_SW_HIGH;
+    step(2u);
+    assert(app_runtime_get_state() == APP_FSM_STATE_MANUAL && !test_output_enabled);
+    step(2u);
+    assert(test_output_enabled && test_manual_calls == 0u);
+    step(2u);
+    assert(test_manual_calls == 1u && !app_runtime_has_fault());
+
+    reset_fixture();
+    all_ready();
+    test_remote.channel[REMOTE_CH_SWD] = REMOTE_SW_LOW;
+    step(2u);
+    step(2u);
+    test_auto_result = APP_CONTROL_RESULT_CHASSIS_ERROR;
     step(2u);
     assert(app_runtime_get_state() == APP_FSM_STATE_FAULT && !test_output_enabled);
+}
+
+static void test_pump_mode(void) {
+    reset_fixture();
     all_ready();
-    test_online = test_clear_event = test_clear_active = true;
-    key_level(false, 50u);
-    key_level(true, 50u);
-    assert(app_runtime_get_state() == APP_FSM_STATE_FAULT && !test_output_enabled);
+    test_remote.channel[REMOTE_CH_SWD] = REMOTE_SW_LOW;
+    step(2u);
+    step(2u);
+    assert(test_output_enabled && test_auto_calls == 1u && !test_pump_enabled);
+
+    test_remote.channel[REMOTE_CH_SWA] = REMOTE_SW_LOW;
+    test_remote.channel[REMOTE_CH_SWC] = REMOTE_SW_CENTER;
+    step(2u);
+    assert(app_runtime_get_state() == APP_FSM_STATE_IDLE);
+    assert(!test_output_enabled && test_auto_calls == 1u);
+    assert(test_pump_enabled && test_pump_relays == 0u);
+
+    test_remote.channel[REMOTE_CH_LEFT_X] = REMOTE_CENTER - REMOTE_DEADBAND - 1u;
+    test_remote.channel[REMOTE_CH_RIGHT_X] = REMOTE_CENTER + REMOTE_DEADBAND + 1u;
+    step(2u);
+    assert(test_pump_relays == (APP_PUMP_RELAY_1 | APP_PUMP_RELAY_4));
+    test_remote.channel[REMOTE_CH_LEFT_X] = REMOTE_CENTER + REMOTE_DEADBAND + 1u;
+    test_remote.channel[REMOTE_CH_RIGHT_X] = REMOTE_CENTER - REMOTE_DEADBAND - 1u;
+    step(2u);
+    assert(test_pump_relays == (APP_PUMP_RELAY_2 | APP_PUMP_RELAY_3));
+    test_remote.channel[REMOTE_CH_LEFT_X] = REMOTE_CENTER + REMOTE_DEADBAND;
+    test_remote.channel[REMOTE_CH_RIGHT_X] = REMOTE_CENTER - REMOTE_DEADBAND;
+    step(2u);
+    assert(test_pump_enabled && test_pump_relays == 0u);
+
+    test_remote.channel[REMOTE_CH_LEFT_X] = REMOTE_SW_HIGH;
+    test_remote.channel[REMOTE_CH_SWC] = REMOTE_SW_HIGH;
+    step(2u);
+    assert(!test_pump_enabled && test_pump_relays == 0u && !test_output_enabled);
+    test_remote.channel[REMOTE_CH_SWC] = REMOTE_SW_LOW;
+    step(2u);
+    assert(!test_pump_enabled && test_pump_relays == 0u && !test_output_enabled);
+    test_remote.channel[REMOTE_CH_SWC] = REMOTE_SW_CENTER;
+    step(2u);
+    assert(test_pump_enabled && test_pump_relays == APP_PUMP_RELAY_1);
+
+    test_online = false;
+    step(102u);
+    assert(!test_pump_enabled && test_pump_relays == 0u);
+    test_online = true;
+    step(2u);
+    assert(test_pump_enabled);
+    test_remote.channel[REMOTE_CH_SWA] = REMOTE_SW_HIGH;
+    step(2u);
+    assert(!test_pump_enabled && test_pump_relays == 0u);
+    assert(app_runtime_get_state() == APP_FSM_STATE_AUTO && test_output_enabled);
+
+    test_remote.channel[REMOTE_CH_SWA] = REMOTE_SW_LOW;
+    assert(app_fsm_request_estop());
+    step(2u);
+    assert(app_runtime_get_state() == APP_FSM_STATE_ESTOP);
+    assert(!test_pump_enabled && test_pump_relays == 0u && !test_output_enabled);
 }
 
 int main(void) {
     test_local_start_and_stop();
-    test_key_ownership_and_fault();
+    test_radio_overrides_local_auto();
+    test_key_ownership_and_auto_odom_error();
     test_level_selection_wait_and_prepare();
     test_actual_preparation_timeout_and_nonzero_stick();
     test_fault_clear_and_held_stop();
     test_offline_and_existing_auto_flow();
-    puts("PASS runtime: local key, ownership, EStop, RC safety, wheel startup and Auto");
+    test_auto_errors_do_not_fault_or_insert_zero();
+    test_pump_mode();
+    puts("PASS runtime: local key, ownership, EStop, RC safety, Manual faults, Auto override and pump mode");
     return 0;
 }

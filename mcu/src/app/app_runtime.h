@@ -9,6 +9,16 @@
 #include "app_fsm.h"
 
 #include <stdbool.h>
+#include <stdint.h>
+
+enum {
+    APP_PUMP_RELAY_1 = 1u << 0,
+    APP_PUMP_RELAY_2 = 1u << 1,
+    APP_PUMP_RELAY_3 = 1u << 2,
+    APP_PUMP_RELAY_4 = 1u << 3,
+};
+
+typedef void (*AppPumpOutput)(bool enabled, uint8_t relay_mask);
 
 // ! ========================= 接 口 函 数 声 明 ========================= ! //
 
@@ -17,6 +27,9 @@
  * @details 负责初始化系统级状态机, 控制映射模块和运行时缓存
  */
 void app_runtime_init(void);
+
+/** @brief Register the board output for pump enable and relays 1 through 4. */
+void app_runtime_set_pump_output(AppPumpOutput output);
 
 /**
  * @brief 执行一次 MCU 应用运行时轮询

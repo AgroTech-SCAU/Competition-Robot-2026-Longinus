@@ -14,6 +14,8 @@
     { x, ROW(row), ROUTE_CONNECT_SPEED_MPS, side, LASER_NO_BEAM, false, false }
 
 /* Every crossing uses front+rear centering inside the 50..125 mm furrow gate.
+ * Only leg 01 additionally settles FRONT=70 mm. Later +vx connectors keep wheel
+ * X because FRONT looks back at the previous furrow and must not pull the car back.
  * Leg 15 instead requires LEFT=45 mm during its final settle before leg 16.
  * Leg 16 has no guidance or alignment and exits directly by wheel odometry. */
 const MapRouteLeg map_route[] = {

@@ -157,6 +157,8 @@ OdomStatus odom_init(const OdomConfig* config) {
         if(status != chassis_imu_odom.OK) return od.FUSION_FAILED;
     }
     else {
+        /* Wheel mode still uses the configured thresholds for IMU boot calibration. */
+        s_fusion.config = s_config.fusion;
         chassis_update_imu_tilt(NAN, NAN);
     }
 
@@ -193,8 +195,9 @@ OdomStatus odom_process(void) {
     s_odom.wheel_fusion = s_odom.wheel_corrected;
     s_odom.wheel_fusion.z *= s_config.wheel_yaw_rate_scale;
 
-    if(s_config.wheel_only) return odom_process_wheels(&wheel);
-    s_odom.fusion_ready = false;
+    /* Wheel-only position still samples the IMU for the independent Auto yaw loop.
+       IMU health is exposed separately and never replaces the wheel pose. */
+    if(!s_config.wheel_only) s_odom.fusion_ready = false;
 
     const SteerWheelControl* command = chassis.get_control();
     const bool command_stopped = command != NULL && command->vx == 0.0f &&
@@ -211,6 +214,10 @@ OdomStatus odom_process(void) {
         ? command_stopped && wheel_stopped && was_stationary : boot_candidate);
 
     if(imu.update() != IMU_STATUS_OK || imu_get_sample(&sample) != IMU_STATUS_OK) {
+        if(s_config.wheel_only) {
+            (void)imu_set_stationary(false);
+            return odom_process_wheels(&wheel);
+        }
         odom_invalidate();
         return od.NOT_READY;
     }
@@ -241,16 +248,18 @@ OdomStatus odom_process(void) {
     s_odom.imu_ready = gyro_valid && s_odom.imu_calibrated;
     if(!s_odom.imu_ready) {
         /* Do not clear the startup candidate while calibration is accumulating. */
-        chassis_imu_odom_invalidate(&s_fusion);
-        chassis_update_imu_tilt(NAN, NAN);
         if(!gyro_valid) (void)imu_set_stationary(false);
         s_gyro_timestamp_seen = false;
         s_yaw_integral_seeded = false;
+        if(s_config.wheel_only) return odom_process_wheels(&wheel);
+        chassis_imu_odom_invalidate(&s_fusion);
+        chassis_update_imu_tilt(NAN, NAN);
         return od.NOT_READY;
     }
     s_odom.timing_valid = odom_resolve_process_dt_s(&sample, &dt_s);
     s_odom.process_dt_s = dt_s;
     if(!s_odom.timing_valid) {
+        if(s_config.wheel_only) return odom_process_wheels(&wheel);
         ++s_odom.discontinuity_count;
         odom_invalidate();
         return od.NOT_READY;
@@ -272,6 +281,7 @@ OdomStatus odom_process(void) {
     }
     /* Mahony retains a valid attitude while briefly coasting without accelerometer correction. */
     imu_input.angle_valid = odom_finite_vec3(imu_input.angle);
+    if(s_config.wheel_only) return odom_process_wheels(&wheel);
     if(imu_input.angle_valid && s_odom.acc_valid) {
         chassis_update_imu_tilt(imu_input.angle.x, imu_input.angle.y);
     }

@@ -19,7 +19,7 @@
 #define APP_RUNTIME_STOP_RETRY_MS 100u
 #define APP_RUNTIME_KEY_DEBOUNCE_MS 30u
 
-/* A locally started race owns the controls through finish or fault, until reset. */
+/* A locally started race owns the controls only while the radio is offline. */
 static bool s_local_race;
 static bool s_key_candidate_pressed;
 static bool s_key_armed;
@@ -31,6 +31,7 @@ static bool s_stop_requested = false;
 static bool s_stop_retry_pending = false;
 static ms_t s_stop_last_attempt_ms = 0u;
 static bool s_stop_attempted_this_cycle = false;
+static AppPumpOutput s_pump_output;
 /* Preserve the actual triggering frame; stopping motors makes later wheel
    feedback unavailable and would otherwise hide the readiness failure. */
 static volatile Odom s_odom_fault_snapshot;
@@ -39,6 +40,10 @@ static volatile bool s_odom_fault_was_starting;
 static bool app_runtime_sticks_centered(void);
 static void app_runtime_raise_fault(AppFaultSource source, int32_t code);
 static void app_runtime_stop(bool force);
+
+void app_runtime_set_pump_output(AppPumpOutput output) {
+    s_pump_output = output;
+}
 
 void app_runtime_init(void) {
     s_local_race = false;
@@ -55,6 +60,21 @@ void app_runtime_init(void) {
     app_odom_test_reset();
     app_control_init();
     app_fsm_init();
+    if(s_pump_output != NULL) s_pump_output(false, 0u);
+}
+
+static uint8_t app_runtime_pump_relays(const FsIa10bData* radio) {
+    const uint16_t low = REMOTE_CENTER - REMOTE_DEADBAND;
+    const uint16_t high = REMOTE_CENTER + REMOTE_DEADBAND;
+    const uint16_t left = radio->channel[REMOTE_CH_LEFT_X];
+    const uint16_t right = radio->channel[REMOTE_CH_RIGHT_X];
+    uint8_t relays = 0u;
+
+    if(left < low) relays |= APP_PUMP_RELAY_1;
+    else if(left > high) relays |= APP_PUMP_RELAY_2;
+    if(right < low) relays |= APP_PUMP_RELAY_3;
+    else if(right > high) relays |= APP_PUMP_RELAY_4;
+    return relays;
 }
 
 static bool app_runtime_key_press(bool pressed, ms_t now) {
@@ -75,12 +95,26 @@ static bool app_runtime_key_press(bool pressed, ms_t now) {
 void app_runtime_process(bool local_key_pressed) {
     const bool key_event = app_runtime_key_press(local_key_pressed, delay_now_ms());
     const bool online = remote_is_online(100u);
+    const FsIa10bData* radio = online ? remote_get_raw_data() : NULL;
+    const bool pump_requested = radio != NULL && radio->channel[REMOTE_CH_SWA] == REMOTE_SW_LOW;
+    const bool pump_enabled_requested = pump_requested &&
+                                        radio->channel[REMOTE_CH_SWC] == REMOTE_SW_CENTER;
+    const bool clear_reset_event = online && remote_take_clear_reset_event();
+    const bool clear_reset_active = online && remote_is_clear_reset_active();
     const bool manual_request = remote_is_manual_requested();
     const bool auto_request = remote_is_auto_requested();
     AppControlResult control_result;
     ChassisErrorCode status;
 
     s_stop_attempted_this_cycle = false;
+    if(s_pump_output != NULL && (!pump_enabled_requested || clear_reset_event || clear_reset_active)) {
+        s_pump_output(false, 0u);
+    }
+    /* Radio ownership always overrides a locally started race. */
+    if(online && s_local_race) {
+        s_local_race = false;
+        log_info("AUTO radio override");
+    }
     if(s_local_race) {
         if(key_event && app_fsm_get_state() == APP_FSM_STATE_AUTO) {
             (void)app_fsm_request_estop();
@@ -101,7 +135,7 @@ void app_runtime_process(bool local_key_pressed) {
             log_info("AUTO local key start");
         }
     }
-    else if(remote_take_clear_reset_event()) {
+    else if(clear_reset_event) {
         app_runtime_stop(false);
         if(s_stop_retry_pending) return;
         if(app_fsm_get_state() == APP_FSM_STATE_FAULT) {
@@ -115,13 +149,26 @@ void app_runtime_process(bool local_key_pressed) {
         app_fsm_process();
         return;
     }
-    else if(remote_is_clear_reset_active()) {
+    else if(clear_reset_active) {
         /* The existing stop/clear combination holds output disabled until
            released; its one-shot clear event must not become an auto-restart. */
         app_runtime_stop(false);
         if(s_stop_retry_pending) return;
         (void)app_fsm_post(APP_FSM_EVENT_STOP);
         app_fsm_process();
+        return;
+    }
+    else if(pump_requested) {
+        app_runtime_stop(false);
+        const AppFsmStateId state = app_fsm_get_state();
+        if(state == APP_FSM_STATE_MANUAL || state == APP_FSM_STATE_AUTO) {
+            (void)app_fsm_post(APP_FSM_EVENT_STOP);
+        }
+        app_fsm_process();
+        if(s_pump_output != NULL && pump_enabled_requested) {
+            const bool enabled = !s_stop_retry_pending && app_fsm_get_state() == APP_FSM_STATE_IDLE;
+            s_pump_output(enabled, enabled ? app_runtime_pump_relays(radio) : 0u);
+        }
         return;
     }
     else if(auto_request) {
@@ -191,7 +238,7 @@ void app_runtime_process(bool local_key_pressed) {
         s_motor_starting = true;
         s_motor_start_since_ms = delay_now_ms();
     }
-    if(!s_motor_starting && !odom.is_ready()) {
+    if(manual_mode && !s_motor_starting && !odom.is_ready()) {
         app_runtime_raise_fault(APP_FAULT_SOURCE_ODOM, 1);
         return;
     }
@@ -226,7 +273,7 @@ void app_runtime_process(bool local_key_pressed) {
     }
 
     if(s_motor_starting) {
-        /* Startup is bounded and keeps zero targets until all feedback is ready */
+        /* Startup is bounded and keeps zero targets until chassis feedback is ready. */
         control_result = app_control_hold_zero_chassis();
     }
     else if(!chassis.is_ready()) {
@@ -240,7 +287,14 @@ void app_runtime_process(bool local_key_pressed) {
         control_result = app_odom_test_process();
     }
 
-    if(control_result != APP_CONTROL_RESULT_OK && control_result != APP_CONTROL_RESULT_SKIPPED) {
+    /* Auto route/state-estimation errors never enter Fault or insert a zero
+       command. The previous chassis target remains owned by chassis.process();
+       the radio can still switch to Manual. Hardware errors remain fatal. */
+    const bool auto_navigation_error = auto_mode &&
+        (control_result == APP_CONTROL_RESULT_ODOM_ERROR ||
+         control_result == APP_CONTROL_RESULT_COMMAND_INVALID);
+    if(!auto_navigation_error && control_result != APP_CONTROL_RESULT_OK &&
+       control_result != APP_CONTROL_RESULT_SKIPPED) {
         app_runtime_raise_fault(control_result == APP_CONTROL_RESULT_ODOM_ERROR
                                     ? APP_FAULT_SOURCE_ODOM : APP_FAULT_SOURCE_CHASSIS,
                                 control_result);
@@ -252,7 +306,7 @@ void app_runtime_process(bool local_key_pressed) {
         app_runtime_raise_fault(APP_FAULT_SOURCE_CHASSIS, status);
         return;
     }
-    if(chassis.is_ready() && odom.is_ready()) {
+    if(chassis.is_ready() && (auto_mode || odom.is_ready())) {
         s_motor_starting = false;
     }
     else if(!s_motor_starting) {
