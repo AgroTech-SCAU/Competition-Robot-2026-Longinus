@@ -7,6 +7,7 @@
  */
 
 #include "app_runtime.h"
+#include "app_odom_test.h"
 #include "app_status.h"
 #include "assemble/assemble.h"
 #include "chassis.h"
@@ -78,7 +79,15 @@ static inline bool entry_chassis_settle(ms_t interval_ms) {
     return true;
 }
 
-static inline void entry_set_pump_output(bool enabled, uint8_t relays) {
+static bool s_entry_manual_pump_enabled;
+static uint8_t s_entry_manual_pump_relays;
+
+static inline void entry_set_manual_pump_output(bool enabled, uint8_t relays) {
+    s_entry_manual_pump_enabled = enabled;
+    s_entry_manual_pump_relays = relays;
+}
+
+static inline void entry_write_pump_output(bool enabled, uint8_t relays) {
     if(!enabled) {
         HAL_GPIO_WritePin(PUMP_EN_GPIO_Port, PUMP_EN_Pin, GPIO_PIN_RESET);
         relays = 0u;
@@ -130,6 +139,7 @@ static inline void entry_init(void) {
     else {
         log_error("BOOT CAN3 RX initialization failed");
     }
+    if(assemble_work_laser() != SYSTEM_STATUS_OK) log_error("BOOT UART9 work laser initialization failed");
     if(!entry_chassis_settle(100u)) return;
 
     if(!entry_boot_check(assemble_remote(), "remote"))
@@ -140,7 +150,7 @@ static inline void entry_init(void) {
     {
         remote_init();
 
-        app_runtime_set_pump_output(entry_set_pump_output);
+        app_runtime_set_pump_output(entry_set_manual_pump_output);
         app_runtime_init();
         app_status_init();
     }
@@ -175,6 +185,10 @@ static inline void entry_loop(void) {
            before this cycle's wheel odometry update. This never enables motors. */
         (void)chassis_poll_feedback();
         assemble_laser_process();
+        uint16_t work_range_mm;
+        uint32_t work_range_ms;
+        const bool work_frame = assemble_work_laser_get_range(&work_range_mm, &work_range_ms);
+        app_odom_test_set_work_range(work_frame, work_range_mm, work_range_ms);
         if(entry_tick_250hz(elapsed_ticks)) {
             odom.process();
         }
@@ -182,6 +196,11 @@ static inline void entry_loop(void) {
             remote_process();
         }
         app_runtime_process(HAL_GPIO_ReadPin(USER_KEY_GPIO_Port, USER_KEY_Pin) == GPIO_PIN_RESET);
+        /* Runtime may cancel Auto this cycle. Apply the final owner once. */
+        const bool auto_pump = app_runtime_get_state() == APP_FSM_STATE_AUTO &&
+                               app_odom_test_work_pump_enabled();
+        entry_write_pump_output(auto_pump || s_entry_manual_pump_enabled,
+                                s_entry_manual_pump_relays);
         assemble_scheduler_finish_tick();
     }
     app_status_process();

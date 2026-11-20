@@ -6,7 +6,8 @@
 
 /* Right-handed base_link: +vx is the actual front, +vy is the physical left.
  * The vehicle reverses into the field: field +Y = -vx, field +X = +vy.
- * CAN distance 1..4 remain LASER_FRONT/REAR/LEFT/RIGHT. */
+ * CAN distance 1..4 remain LASER_FRONT/REAR/LEFT/RIGHT. The CAN LEFT points
+ * along -vy toward the vehicle's physical right and the map west wall. */
 #define MAP_START_X_M 0.20f
 #define MAP_START_Y_M (-0.50f)
 #define MAP_ROUTE_LASER_GUIDANCE_ENABLED 1
@@ -16,10 +17,10 @@ typedef struct {
     float y_m;
     float speed_mps;
     LaserBeam control_beam; /* Travel target; FRONT+REAR are combined when gated. */
-    LaserBeam settle_beam;  /* NO_BEAM reuses control_beam; leg 15 overrides to LEFT. */
-                            /* Only leg 01 also settles FRONT=70 mm; later connectors use wheel X. */
-    bool furrow_gate;       /* Front+rear=50..125 mm enables dual-axis centering. */
+    bool furrow_gate;       /* Front+rear=95..125 mm acquires dual-beam centering. */
     bool rear_escape;       /* Rear 30 mm protection only on 05/07/.../15. */
+    bool work_stop;         /* Service each furrow on its first traversal. */
+    bool endpoint_side_trim; /* Require side-wall alignment before changing legs. */
 } MapRouteLeg;
 
 extern const MapRouteLeg map_route[];

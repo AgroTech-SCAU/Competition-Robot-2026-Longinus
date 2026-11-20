@@ -8,36 +8,33 @@
 #define ROUTE_CONNECT_SPEED_MPS 0.32f
 #define ROUTE_RETURN_SPEED_MPS 0.45f
 
-#define CROSS(x, row, rear_escape) \
-    { x, ROW(row), ROUTE_CROSS_SPEED_MPS, LASER_FRONT, LASER_NO_BEAM, true, rear_escape }
+#define CROSS(x, row, rear_escape, work_stop, endpoint_trim) \
+    { x, ROW(row), ROUTE_CROSS_SPEED_MPS, LASER_FRONT, true, rear_escape, work_stop, endpoint_trim }
 #define CONNECT(x, row, side) \
-    { x, ROW(row), ROUTE_CONNECT_SPEED_MPS, side, LASER_NO_BEAM, false, false }
+    { x, ROW(row), ROUTE_CONNECT_SPEED_MPS, side, false, false, false, false }
 
-/* Every crossing uses front+rear centering inside the 50..125 mm furrow gate.
- * Only leg 01 additionally settles FRONT=70 mm. Later +vx connectors keep wheel
- * X because FRONT looks back at the previous furrow and must not pull the car back.
- * Leg 15 instead requires LEFT=45 mm during its final settle before leg 16.
- * Leg 16 has no guidance or alignment and exits directly by wheel odometry. */
+/* Every crossing acquires front+rear centering inside the 95..125 mm furrow gate.
+ * Connectors use wheel distance along +vx and the corresponding side beam.
+ * 02 and 03 pass through furrow 1. The return pass 03 is transit only. */
 const MapRouteLeg map_route[] = {
-    { WEST, ROW(7), ROUTE_START_SPEED_MPS, LASER_LEFT, LASER_NO_BEAM,
-      false, false },                                             /* 01 */
-    CROSS(EAST, 7, false),                                        /* 02 */
-    CROSS(WEST, 7, false),                                        /* 03 */
+    { WEST, ROW(7), ROUTE_START_SPEED_MPS, LASER_LEFT,
+      false, false, false, false },                               /* 01 */
+    CROSS(EAST, 7, false, true, false),                            /* 02 */
+    CROSS(WEST, 7, false, false, true),                            /* 03: return through furrow 1 */
     CONNECT(WEST, 6, LASER_LEFT),                                 /* 04 */
-    CROSS(EAST, 6, true),                                         /* 05 */
+    CROSS(EAST, 6, true, true, true),                             /* 05 */
     CONNECT(EAST, 5, LASER_RIGHT),                                /* 06 */
-    CROSS(WEST, 5, true),                                         /* 07 */
+    CROSS(WEST, 5, true, true, true),                             /* 07 */
     CONNECT(WEST, 4, LASER_LEFT),                                 /* 08 */
-    CROSS(EAST, 4, true),                                         /* 09 */
+    CROSS(EAST, 4, true, true, true),                             /* 09 */
     CONNECT(EAST, 3, LASER_RIGHT),                                /* 10 */
-    CROSS(WEST, 3, true),                                         /* 11 */
+    CROSS(WEST, 3, true, true, true),                             /* 11 */
     CONNECT(WEST, 2, LASER_LEFT),                                 /* 12 */
-    CROSS(EAST, 2, true),                                         /* 13 */
+    CROSS(EAST, 2, true, true, true),                             /* 13 */
     CONNECT(EAST, 1, LASER_RIGHT),                                /* 14 */
-    { WEST, ROW(1), ROUTE_CROSS_SPEED_MPS, LASER_FRONT, LASER_LEFT,
-      true, true },                                               /* 15: settle LEFT */
+    CROSS(WEST, 1, true, true, true),                             /* 15 */
     { WEST, MAP_START_Y_M, ROUTE_RETURN_SPEED_MPS,
-      LASER_NO_BEAM, LASER_NO_BEAM, false, false },               /* 16: wheel only */
+      LASER_NO_BEAM, false, false, false, false },                /* 16: wheel only */
 };
 const size_t map_route_count = sizeof(map_route) / sizeof(map_route[0]);
 

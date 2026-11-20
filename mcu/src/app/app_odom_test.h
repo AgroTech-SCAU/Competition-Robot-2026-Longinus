@@ -3,6 +3,7 @@
 
 #include "app_control.h"
 #include <stdbool.h>
+#include <stdint.h>
 
 enum { APP_LASER_X = 1u, APP_LASER_Y = 2u };
 
@@ -25,6 +26,9 @@ void app_odom_test_reset(void);
 float app_odom_test_remaining_m(void);
 
 bool app_odom_test_is_done(void);
+
+void app_odom_test_set_work_range(bool frame_received, uint16_t distance_mm, uint32_t stamp_ms);
+bool app_odom_test_work_pump_enabled(void);
 
 /* Run the route once in Auto after motor preparation, then hold zero speed. */
 AppControlResult app_odom_test_process(void);

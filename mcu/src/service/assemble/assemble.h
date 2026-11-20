@@ -33,6 +33,8 @@ SystemStatus assemble_odom(void);
 SystemStatus assemble_laser(void);
 void assemble_laser_process(void);
 void assemble_laser_log_diagnostics(void);
+SystemStatus assemble_work_laser(void);
+bool assemble_work_laser_get_range(uint16_t* distance_mm, uint32_t* stamp_ms);
 SystemStatus assemble_remote(void);
 SystemStatus assemble_tim6_500hz(void);
 /** Consume the newest tick once; elapsed_ticks includes skipped periods
